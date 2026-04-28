@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+backend/models/*.zip
+frontend/node_modules/
+frontend/dist/
