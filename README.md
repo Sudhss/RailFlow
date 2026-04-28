@@ -2,6 +2,8 @@
 
 RailFlow is a local railway traffic control simulation for the Delhi to Lucknow operating region. It uses a weighted railway graph, deterministic train movement, Dijkstra routing, congestion-aware rerouting, a safe RL wrapper with heuristic fallback, FastAPI, WebSockets, and a React operations console.
 
+<img width="1898" height="858" alt="image" src="https://github.com/user-attachments/assets/0b26a725-8878-4973-b145-bc486b1e6e97" />
+
 ## Run Backend
 
 Fast start:
