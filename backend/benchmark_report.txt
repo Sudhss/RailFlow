@@ -1,0 +1,95 @@
+
+====================================================================================================
+                     RAILFLOW -- RESUME METRICS BENCHMARK REPORT
+====================================================================================================
+
+----------------------------------------------------------------------------------------------------
+  METRIC 1: Route-Decision Latency -- Dijkstra vs Bellman-Ford (weighted baseline)
+----------------------------------------------------------------------------------------------------
+
+  Each routing call averaged over 1000 iterations.
+  Occupancy set to (capacity - 1) per edge to simulate near-capacity load.
+
+  O-D Pair             Bellman-Ford       Dijkstra    Reduction  Same Route?
+  --------------------------------------------------------------------------
+  NDLS -> LKO              0.0564ms       0.0632ms       -12.2%          Yes
+  NDLS -> CNB              0.0569ms       0.0903ms       -58.7%          Yes
+  CNB -> NDLS              0.3722ms       0.0831ms       +77.7%          Yes
+  NDLS -> MB               0.0478ms       0.0210ms       +56.2%          Yes
+  MB -> LKO                0.2264ms       0.0533ms       +76.5%          Yes
+  GZB -> SPN               0.0848ms       0.0495ms       +41.7%          Yes
+  LKO -> NDLS              0.5435ms       0.0682ms       +87.4%          Yes
+  BE -> CNB                0.2987ms       0.0646ms       +78.4%          Yes
+  --------------------------------------------------------------------------
+  AVERAGE                  0.2108ms       0.0616ms       +70.8%
+
+  >>> Dijkstra reduces route-decision latency by 70.8% vs weighted baseline
+
+----------------------------------------------------------------------------------------------------
+  METRIC 2: On-Time Performance -- Agent vs No-Agent
+----------------------------------------------------------------------------------------------------
+
+  Sim ticks: 600  |  On-time = delay <= 20 ticks
+
+  Scenario                   Trains  Agt Delay  NoAgt Delay  Delay Red.  Agt OT%  NoAgt OT%  OT Diff
+  ------------------------------------------------------------------------------------------------
+  corridor_overload               8       2427         1865      -30.1%      25%        33%     -8pp
+  multi_closure_chaos             6       1219         2482      +50.9%       0%         0%     +0pp
+  peak_hour_bidirectional        10       1353          652     -107.5%      62%        38%    +25pp
+  cascade_failure                 7       2530         2295      -10.2%     100%         0%   +100pp
+  saturated_network              12       2448         3721      +34.2%      40%        75%    -35pp
+  ------------------------------------------------------------------------------------------------
+  AGGREGATE                               9977        11015       +9.4%      39%        41% -2pp
+
+  >>> Agent reduces total delay by 9.4%
+  >>> On-time performance: 39% (agent) vs 41% (no-agent) = -2pp improvement
+
+----------------------------------------------------------------------------------------------------
+  METRIC 3: Manual Intervention Reduction -- Automated Agent vs Manual-Only
+----------------------------------------------------------------------------------------------------
+
+  Without agent: every congestion tick + stuck train = event requiring manual dispatcher action.
+  With agent:    the automated agent handles reroutes, holds, and stops autonomously.
+
+  Scenario                    Agt Actions  NoAgt Cong  NoAgt Stuck  Manual Evts  Cong Reduct
+  -----------------------------------------------------------------------------------------
+  corridor_overload                    20         361            0          361       -18.3%
+  multi_closure_chaos                  20          52            5           57      -453.8%
+  peak_hour_bidirectional              17         170            0          170       +14.7%
+  cascade_failure                       1          34            6           40       +70.6%
+  saturated_network                    78         149            8          157      -224.2%
+  -----------------------------------------------------------------------------------------
+  AGGREGATE                           136         766                       785       -76.6%
+
+  >>> Agent automated 136 actions, eliminating 82.7% of 785 manual events
+  >>> Congestion-ticks reduced by -76.6% with agent active
+
+----------------------------------------------------------------------------------------------------
+  DETAIL: Agent Action Breakdown per Scenario
+----------------------------------------------------------------------------------------------------
+
+  Scenario                     Reroutes    Holds    Stops    Total
+  ----------------------------------------------------------------
+  corridor_overload                  19        0        1       20
+  multi_closure_chaos                19        0        1       20
+  peak_hour_bidirectional            15        0        2       17
+  cascade_failure                     0        1        0        1
+  saturated_network                  76        0        2       78
+
+====================================================================================================
+                              RESUME METRICS SUMMARY
+====================================================================================================
+
+  1. Route-Decision Latency Reduction (Dijkstra vs Bellman-Ford):  70.8%
+  2. On-Time Performance Improvement  (Agent vs no-agent):         -2pp  (39% vs 41%)
+  3. Delay Reduction                  (Agent vs no-agent):         9.4%
+  4. Manual Intervention Reduction     (Automated vs manual):      82.7%
+  5. Congestion-Ticks Reduction        (Agent vs no-agent):        -76.6%
+
+  Methodology:
+    - 5 stress-test scenarios with 43 total trains
+    - 600 simulation ticks per scenario
+    - 1000 iterations per routing call for latency measurement
+    - On-time threshold: <= 20 ticks delay
+
+====================================================================================================
