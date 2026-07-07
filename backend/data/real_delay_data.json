@@ -1,0 +1,65 @@
+{
+  "_source": "etrain.info running history, May-June 2026 (30-day period)",
+  "_methodology": "Scraped average delay in minutes at each station from etrain.info train running history. On-time defined as <= 15 minutes delay (Indian Railways standard). Data represents actual NDLS-LKO corridor performance.",
+  "_corridor": "Delhi (NDLS) - Lucknow (LKO/LJN) corridor, Northern Railway zone",
+  "_national_punctuality": {
+    "FY_2024_25": "77.12%",
+    "FY_2025_26_H1": "~80%",
+    "source": "Ministry of Railways, PIB"
+  },
+  "trains": {
+    "12003": {
+      "name": "NDLS Swarna Shatabdi",
+      "type": "shatabdi",
+      "route": "LJN -> ON -> CNB -> PHD -> ETW -> TDL -> ALJN -> GZB -> NDLS",
+      "direction": "LKO to NDLS",
+      "frequency": "Daily",
+      "distance_km": 512,
+      "scheduled_time_hrs": 6.25,
+      "station_delays": {
+        "LJN": {"avg_delay_min": 5, "on_time_pct": 90.0, "slight_delay_pct": 6.7, "significant_delay_pct": 3.3},
+        "ON":  {"avg_delay_min": 34, "on_time_pct": 40.0, "slight_delay_pct": 50.0, "significant_delay_pct": 10.0},
+        "CNB": {"avg_delay_min": 33, "on_time_pct": 43.3, "slight_delay_pct": 43.3, "significant_delay_pct": 13.3},
+        "PHD": {"avg_delay_min": 42, "on_time_pct": 20.0, "slight_delay_pct": 56.7, "significant_delay_pct": 23.3},
+        "ETW": {"avg_delay_min": 48, "on_time_pct": 6.7, "slight_delay_pct": 70.0, "significant_delay_pct": 23.3},
+        "TDL": {"avg_delay_min": 42, "on_time_pct": 23.3, "slight_delay_pct": 53.3, "significant_delay_pct": 23.3},
+        "ALJN": {"avg_delay_min": 41, "on_time_pct": 23.3, "slight_delay_pct": 53.3, "significant_delay_pct": 23.3},
+        "GZB": {"avg_delay_min": 33, "on_time_pct": 50.0, "slight_delay_pct": 30.0, "significant_delay_pct": 20.0},
+        "NDLS": {"avg_delay_min": 21, "on_time_pct": 70.0, "slight_delay_pct": 13.3, "significant_delay_pct": 16.7}
+      },
+      "daily_delays_at_destination": [107,44,168,1,54,43,-7,5,-6,48,-3,-13,74,-11,3,63,-11,9,-10,-13,76,-4,-7,-1,11,-12,9,-4,12,5]
+    },
+    "12229": {
+      "name": "Lucknow Mail",
+      "type": "superfast",
+      "route": "LKO -> HRI -> SPN -> BE -> RMU -> MB -> HPU -> GZB -> NDLS",
+      "direction": "LKO to NDLS",
+      "frequency": "Daily",
+      "distance_km": 493,
+      "scheduled_time_hrs": 8.5,
+      "station_delays": {
+        "LKO": {"avg_delay_min": 2, "on_time_pct": 96.7, "slight_delay_pct": 3.3, "significant_delay_pct": 0},
+        "HRI": {"avg_delay_min": 14, "on_time_pct": 83.3, "slight_delay_pct": 13.3, "significant_delay_pct": 3.3},
+        "SPN": {"avg_delay_min": 26, "on_time_pct": 76.7, "slight_delay_pct": 20.0, "significant_delay_pct": 3.3},
+        "BE":  {"avg_delay_min": 36, "on_time_pct": 23.3, "slight_delay_pct": 73.3, "significant_delay_pct": 3.3},
+        "RMU": {"avg_delay_min": 42, "on_time_pct": 13.3, "slight_delay_pct": 83.3, "significant_delay_pct": 3.3},
+        "MB":  {"avg_delay_min": 25, "on_time_pct": 66.7, "slight_delay_pct": 30.0, "significant_delay_pct": 3.3},
+        "HPU": {"avg_delay_min": 31, "on_time_pct": 53.3, "slight_delay_pct": 43.3, "significant_delay_pct": 3.3},
+        "GZB": {"avg_delay_min": 25, "on_time_pct": 83.3, "slight_delay_pct": 13.3, "significant_delay_pct": 3.3},
+        "NDLS": {"avg_delay_min": 20, "on_time_pct": 83.3, "slight_delay_pct": 13.3, "significant_delay_pct": 3.3}
+      },
+      "daily_delays_at_destination": [40,0,33,0,-1,3,1,1,1,4,-1,4,25,0,438,5,-1,1,19,0,4,1,0,-1,-1,0,1,1,2,3]
+    }
+  },
+  "corridor_summary": {
+    "avg_destination_delay_12003_min": 21,
+    "avg_destination_delay_12229_min": 20,
+    "avg_mid_corridor_delay_min": 38,
+    "on_time_at_destination_12003_pct": 70.0,
+    "on_time_at_destination_12229_pct": 83.3,
+    "corridor_on_time_avg_pct": 76.7,
+    "worst_station_delay_min": 48,
+    "worst_station": "ETW (Etawah)",
+    "comment": "Trains typically depart on time from origin but accumulate 30-50 min delays at mid-corridor stations due to congestion, signal failures, and track sharing. Delay partially recovers near destination due to priority paths and slack in schedule."
+  }
+}
