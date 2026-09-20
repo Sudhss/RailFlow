@@ -98,3 +98,35 @@ export function corridorCoordinates(geographic, order) {
   }
   return result;
 }
+
+/**
+ * Ground-plane movement for a drag of (dx, dy) screen pixels.
+ *
+ * Drag-to-pan means the ground follows the cursor: grab a station, move the
+ * mouse, and that station stays under the pointer. So the focus travels
+ * *against* the drag.
+ *
+ * `heading` is the azimuth from the focus out to the camera, which makes the
+ * direction from camera into the scene -(sin h, cos h) and screen-right
+ * (cos h, -sin h) on the ground.
+ *
+ * The vertical component is divided by sin(pitch): a nearly flat camera sees
+ * the ground heavily foreshortened, so one pixel of vertical drag covers far
+ * more ground than one pixel of horizontal drag. Without this, panning feels
+ * sluggish at low altitude and the ground slips under the cursor.
+ */
+export function panDelta(dx, dy, heading, pitch, pixelSize) {
+  const rightX = Math.cos(heading);
+  const rightZ = -Math.sin(heading);
+  const forwardX = -Math.sin(heading);
+  const forwardZ = -Math.cos(heading);
+
+  const foreshorten = Math.max(0.25, Math.sin(pitch));
+  const alongScreenY = (dy / foreshorten) * pixelSize;
+  const alongScreenX = dx * pixelSize;
+
+  return {
+    x: -rightX * alongScreenX + forwardX * alongScreenY,
+    z: -rightZ * alongScreenX + forwardZ * alongScreenY,
+  };
+}

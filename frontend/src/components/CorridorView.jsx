@@ -73,6 +73,10 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
   // view recovers from the GPU taking its context away.
   const [generation, setGeneration] = useState(0);
   const [contextLost, setContextLost] = useState(false);
+  const [freeLook, setFreeLook] = useState(false);
+  const freeLookRef = useRef(false);
+  freeLookRef.current = freeLook;
+  const dragRef = useRef(null);
 
   const routeKey = selectedTrain?.route?.join(">") || "";
 
@@ -222,6 +226,7 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
       }
     }
     sceneRef.current?.setSelection(selectedTrain?.id || null, ids);
+    if (selectedTrain?.id) setFreeLook(false);
   }, [selectedTrain?.id, routeKey, topologyKey, generation]);
 
   useEffect(() => {
@@ -231,6 +236,48 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
   useEffect(() => {
     sceneRef.current?.setBasis(basis);
   }, [basis, generation]);
+
+  /* --------------------------------------------------------------- pointer */
+
+  function beginDrag(event) {
+    const scene = sceneRef.current;
+    if (!scene || (event.button !== 0 && event.button !== 1)) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      // Middle button or shift swings the view around instead of sliding it.
+      rotate: event.button === 1 || event.shiftKey,
+    };
+  }
+
+  function duringDrag(event) {
+    const drag = dragRef.current;
+    const scene = sceneRef.current;
+    if (!drag || !scene) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (dx === 0 && dy === 0) return;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+
+    if (drag.rotate) {
+      scene.setOrbit(-dx * 0.006);
+      return;
+    }
+    scene.pan(dx, dy);
+    if (!freeLookRef.current) setFreeLook(true);
+  }
+
+  function endDrag(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    dragRef.current = null;
+  }
+
+  function recentre() {
+    sceneRef.current?.recentre();
+    setFreeLook(false);
+  }
 
   /* -------------------------------------------------------------- keyboard */
 
@@ -258,6 +305,11 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
         break;
       case "Home":
         setAltitude(1);
+        recentre();
+        break;
+      case "c":
+      case "C":
+        recentre();
         break;
       default:
         return;
@@ -289,8 +341,13 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
         className="corridor-canvas"
         tabIndex={0}
         role="application"
-        aria-label="Corridor view. Arrow up and down change altitude between the region diagram and a single section, left and right rotate the view, and G switches between the control-room diagram and true geography."
+        aria-label="Corridor view. Drag to move across the region, shift-drag to rotate. Arrow up and down change altitude between the region diagram and a single section, left and right rotate the view, G switches between the control-room diagram and true geography, and C recentres on the selected train."
+        data-dragging={freeLook ? "free" : undefined}
         onKeyDown={onKeyDown}
+        onPointerDown={beginDrag}
+        onPointerMove={duringDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
       />
       <div className="corridor-labels" ref={labelLayerRef} aria-hidden="true" />
 
@@ -346,6 +403,27 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="camera-state">
+          {freeLook ? (
+            <>
+              <span className="camera-state-label">Free look</span>
+              <button type="button" className="link-button" onClick={recentre}>
+                {selectedTrain ? `Recentre on ${selectedTrain.id}` : "Recentre"}
+              </button>
+            </>
+          ) : (
+            <span className="camera-state-label">
+              {selectedTrain ? (
+                <>
+                  Following <span className="mono">{selectedTrain.id}</span>
+                </>
+              ) : (
+                "Whole region"
+              )}
+            </span>
+          )}
         </div>
 
         <div className="basis-switch" role="group" aria-label="Coordinate basis">

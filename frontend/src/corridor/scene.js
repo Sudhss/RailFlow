@@ -55,7 +55,7 @@ import {
   WebGLRenderer,
 } from "three";
 
-import { buildBases, corridorCoordinates, WORLD_WIDTH } from "./projection.js";
+import { buildBases, corridorCoordinates, panDelta, WORLD_WIDTH } from "./projection.js";
 import { buildAlignment, sampleAt } from "./alignment.js";
 import { attitude, createTrainMotion, integrate, reconcile } from "./physics.js";
 import { corridorAt, waveAt, WAVE_GLSL } from "./wave.js";
@@ -407,6 +407,12 @@ export class CorridorScene {
     this.targetFocus = new Vector3();
     this.origin = new Vector3();
     this.orbit = 0;
+
+    // Free look. Once the operator drags, the camera stops following its
+    // subject and holds where it was put; selecting a train takes it back.
+    this.detached = false;
+    this.manualFocus = new Vector3();
+    this._pitch = 1.4;
 
     this.stations = [];
     this.edges = [];
@@ -819,7 +825,28 @@ export class CorridorScene {
     }
   }
 
+  /**
+   * Move the view across the ground by a drag in screen pixels.
+   * The first drag detaches the camera from whatever it was following.
+   */
+  pan(dx, dy) {
+    if (!this.detached) {
+      this.detached = true;
+      this.manualFocus.copy(this.targetFocus);
+    }
+    const delta = panDelta(dx, dy, this.heading, this._pitch, this._pixelSize || 0.001);
+    this.manualFocus.x += delta.x;
+    this.manualFocus.z += delta.z;
+  }
+
+  /** Hand the camera back to its subject. */
+  recentre() {
+    this.detached = false;
+  }
+
   setSelection(trainId, routeEdgeIds) {
+    // Choosing a train is also a request to look at it.
+    if (trainId && trainId !== this.selectedTrainId) this.detached = false;
     this.selectedTrainId = trainId || null;
     this.routeEdges = new Set(routeEdgeIds || []);
     if (this.edgeStateData) {
@@ -1048,7 +1075,10 @@ export class CorridorScene {
 
   _updateCamera(dt) {
     const selected = this.trains.find((t) => t.id === this.selectedTrainId);
-    if (selected) {
+    if (this.detached) {
+      // Held wherever the operator left it.
+      this.targetFocus.copy(this.manualFocus);
+    } else if (selected) {
       const motion = this.motions.get(selected.id);
       const placement = motion ? this._trainPlacement(selected, motion) : null;
       if (placement) {
@@ -1113,6 +1143,7 @@ export class CorridorScene {
     //             is where the gauge, the sleepers and the speed become legible.
     const rail = 1 - smoothstep01(0.06, 0.5, a);
     const pitch = lerp(0.085, 1.49, Math.pow(a, 0.72));
+    this._pitch = pitch;
 
     const forwardX = Math.sin(this.heading);
     const forwardZ = Math.cos(this.heading);

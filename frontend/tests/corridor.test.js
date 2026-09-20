@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildBases, corridorCoordinates, mercator } from "../src/corridor/projection.js";
+import { buildBases, corridorCoordinates, mercator, panDelta } from "../src/corridor/projection.js";
 import { buildAlignment, sampleAt, sampleSection, throughAxis } from "../src/corridor/alignment.js";
 import { attitude, createTrainMotion, integrate, reconcile, simMinutes } from "../src/corridor/physics.js";
 import { corridorAt, waveAt, WAVE_SPREAD, WAVE_GLSL } from "../src/corridor/wave.js";
@@ -361,4 +361,57 @@ test("the morph phase genuinely differs along a section while the wave passes", 
 test("once the wave has passed, every point on a section agrees", () => {
   const settled = [0, 0.25, 0.5, 0.75, 1].map((f) => waveAt(corridorAt(0.1, 0.6, f), 0.1, 1));
   for (const value of settled) assert.equal(value, 1);
+});
+
+/* -------------------------------------------------------------------- pan */
+
+test("dragging moves the ground with the cursor, not against it", () => {
+  // Looking straight down with the camera on +Z: screen-right is world +X and
+  // into-the-screen is world -Z. Grab the map and pull it right, and the view
+  // must travel left so the grabbed point stays under the pointer.
+  const right = panDelta(10, 0, 0, Math.PI / 2, 1);
+  assert.ok(right.x < 0, `dragging right must move the focus west (got ${right.x})`);
+  assert.ok(Math.abs(right.z) < 1e-9, "and not north or south");
+
+  const down = panDelta(0, 10, 0, Math.PI / 2, 1);
+  assert.ok(down.z < 0, `dragging down must move the focus into the scene (got ${down.z})`);
+  assert.ok(Math.abs(down.x) < 1e-9, "and not east or west");
+});
+
+test("pan follows the camera's heading", () => {
+  // Turned a quarter turn, a horizontal drag has to move along a different
+  // world axis or the map slides sideways under the cursor.
+  const straight = panDelta(10, 0, 0, Math.PI / 2, 1);
+  const turned = panDelta(10, 0, Math.PI / 2, Math.PI / 2, 1);
+  assert.ok(Math.abs(straight.x) > 9 && Math.abs(straight.z) < 1e-9);
+  assert.ok(Math.abs(turned.z) > 9 && Math.abs(turned.x) < 1e-6);
+});
+
+test("pan scales with the viewing distance", () => {
+  const near = panDelta(10, 0, 0, Math.PI / 2, 0.001);
+  const far = panDelta(10, 0, 0, Math.PI / 2, 0.5);
+  assert.ok(Math.abs(far.x) > Math.abs(near.x) * 100, "one pixel covers more ground when zoomed out");
+});
+
+test("a low camera pans further vertically to match the foreshortening", () => {
+  // Near the ground the vertical axis is compressed, so the same drag has to
+  // cover more ground or panning feels stuck.
+  const overhead = panDelta(0, 10, 0, Math.PI / 2, 1);
+  const shallow = panDelta(0, 10, 0, 0.1, 1);
+  assert.ok(Math.abs(shallow.z) > Math.abs(overhead.z));
+});
+
+test("the foreshortening correction is capped", () => {
+  // sin(pitch) approaches zero as the camera lies down; without a floor the
+  // first pixel of drag would throw the view to the other side of the region.
+  const flat = panDelta(0, 1, 0, 0.0001, 1);
+  assert.ok(Number.isFinite(flat.z) && Math.abs(flat.z) <= 4.000001, `got ${flat.z}`);
+});
+
+test("no drag, no movement", () => {
+  // Magnitude, not identity: the trig legitimately yields -0 on one axis, and
+  // strict equality treats that as a different value from 0.
+  const still = panDelta(0, 0, 1.2, 0.8, 1);
+  assert.ok(Math.abs(still.x) < 1e-12, `x drifted by ${still.x}`);
+  assert.ok(Math.abs(still.z) < 1e-12, `z drifted by ${still.z}`);
 });
