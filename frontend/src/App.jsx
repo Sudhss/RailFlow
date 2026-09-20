@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AuthExpiredError,
   canUser,
@@ -12,11 +12,15 @@ import { useRailflowStream } from "./state/useRailflowStream.js";
 import LoginView from "./views/LoginView.jsx";
 import SimulationControls from "./components/SimulationControls.jsx";
 import Dashboard from "./components/Dashboard.jsx";
-import CorridorView from "./components/CorridorView.jsx";
 import GraphView from "./components/GraphView.jsx";
 import SignalPanel from "./components/SignalPanel.jsx";
 import TrainGraph from "./components/TrainGraph.jsx";
 import AdminPanel from "./components/AdminPanel.jsx";
+
+// Three.js is most of the console's JavaScript weight and only the corridor
+// view needs it. Splitting it out keeps the first paint -- sign-in, the board,
+// the flat views -- off the critical path of a 3D engine.
+const CorridorView = lazy(() => import("./components/CorridorView.jsx"));
 
 const VIEWS = [
   { id: "corridor", label: "Corridor" },
@@ -39,6 +43,9 @@ export default function App() {
   const [activeView, setActiveView] = useState("corridor");
   const [notice, setNotice] = useState(null);
   const [corridorError, setCorridorError] = useState(null);
+  // Why the operator is looking at the sign-in screen. Deliberately not a
+  // toast: it must still be on screen when they come back to the tab.
+  const [signOutReason, setSignOutReason] = useState(null);
   const noticeTimer = useRef(null);
 
   const showNotice = useCallback((message, tone = "info") => {
@@ -53,15 +60,12 @@ export default function App() {
     if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
   }, []);
 
-  const signOut = useCallback(
-    (message) => {
-      clearSession();
-      setSession(null);
-      setSelectedTrainId(null);
-      if (message) showNotice(message, "warning");
-    },
-    [showNotice]
-  );
+  const signOut = useCallback((message) => {
+    clearSession();
+    setSession(null);
+    setSelectedTrainId(null);
+    setSignOutReason(message || null);
+  }, []);
 
   const handleAuthExpired = useCallback(() => {
     signOut("The backend no longer recognises this session. Sign in again to resume control.");
@@ -138,6 +142,7 @@ export default function App() {
     const result = await loginRequest(username, password);
     storeSession(result);
     setSession(result);
+    setSignOutReason(null);
     setCheckingSession(false);
   }
 
@@ -151,7 +156,7 @@ export default function App() {
   }
 
   if (!session?.token) {
-    return <LoginView onLogin={handleLogin} notice={notice} />;
+    return <LoginView onLogin={handleLogin} reason={signOutReason} />;
   }
 
   const simulation = snapshot?.simulation;
@@ -247,19 +252,21 @@ export default function App() {
             {waiting ? (
               <AcquiringState status={status} onRetry={refresh} />
             ) : activeView === "corridor" ? (
-              <CorridorView
-                snapshot={snapshot}
-                selectedTrain={selectedTrain}
-                onSelectTrain={setSelectedTrainId}
-                onFallback={(message) => {
-                  setCorridorError(message);
-                  setActiveView("network");
-                  showNotice(
-                    "The corridor view could not start. Switched to the Geographic Network.",
-                    "warning"
-                  );
-                }}
-              />
+              <Suspense fallback={<BuildingCorridor />}>
+                <CorridorView
+                  snapshot={snapshot}
+                  selectedTrain={selectedTrain}
+                  onSelectTrain={setSelectedTrainId}
+                  onFallback={(message) => {
+                    setCorridorError(message);
+                    setActiveView("network");
+                    showNotice(
+                      "The corridor view could not start. Switched to the Geographic Network.",
+                      "warning"
+                    );
+                  }}
+                />
+              </Suspense>
             ) : activeView === "network" ? (
               <GraphView
                 stations={stations}
@@ -308,6 +315,19 @@ export default function App() {
                 : `at ${selectedTrain.current_node}`
             }.`
           : "No train selected."}
+      </p>
+    </div>
+  );
+}
+
+/** Shown while the corridor engine's chunk is still downloading. */
+function BuildingCorridor() {
+  return (
+    <div className="acquiring" role="status">
+      <p className="acquiring-title">Laying the corridor</p>
+      <p className="acquiring-body">
+        Building track geometry for the region. The flat Geographic Network and Signal Diagram tabs
+        are available now.
       </p>
     </div>
   );

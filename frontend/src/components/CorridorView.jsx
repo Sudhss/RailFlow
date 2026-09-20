@@ -15,10 +15,13 @@ import { CorridorScene } from "../corridor/scene.js";
  * second to move a few transforms.
  */
 
+// Three named heights on one continuous descent. The labels name a scale of
+// railway, not a rendering mode -- whichever coordinate basis is showing, these
+// mean the same thing.
 const ALTITUDE_STOPS = [
-  { value: 1, label: "Diagram", hint: "Whole region, control-room geometry" },
-  { value: 0.55, label: "Territory", hint: "True geography of the corridor" },
-  { value: 0, label: "Rail", hint: "Track level, following the selected train" },
+  { value: 1, label: "Region", hint: "The whole Delhi – Lucknow operating region" },
+  { value: 0.5, label: "Route", hint: "One train's route end to end" },
+  { value: 0, label: "Section", hint: "One train, its section and the line ahead" },
 ];
 
 function supportsWebGL() {
@@ -49,30 +52,36 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
   const labelLayerRef = useRef(null);
   const sceneRef = useRef(null);
   const nodesRef = useRef({ stations: new Map(), trains: new Map() });
+  // Callbacks and per-tick data are held in refs, not in effect dependencies.
+  // The console re-renders on every snapshot, so anything captured by identity
+  // would tear the WebGL scene down and rebuild it once a second -- which
+  // exhausts the browser's context budget and eventually loses the context
+  // outright.
   const selectRef = useRef(onSelectTrain);
   selectRef.current = onSelectTrain;
+  const fallbackRef = useRef(onFallback);
+  fallbackRef.current = onFallback;
+  const dataRef = useRef({ stations, edges, snapshot });
+  dataRef.current = { stations, edges, snapshot };
 
   const [webgl] = useState(() => supportsWebGL());
   const [reduced, setReduced] = useState(() => prefersReducedMotion());
   const [altitude, setAltitude] = useState(1);
   const [basis, setBasis] = useState(0); // 0 diagram, 1 geography
-  const [stats, setStats] = useState({ calls: 0, fps: 0 });
+  const [stats, setStats] = useState({ calls: 0, fps: 0, grid: 0 });
+  // Bumping this tears the engine down and builds a new one, which is how the
+  // view recovers from the GPU taking its context away.
+  const [generation, setGeneration] = useState(0);
+  const [contextLost, setContextLost] = useState(false);
 
-  const routeEdgeIds = useMemo(() => {
-    const route = selectedTrain?.route;
-    if (!route || route.length < 2 || !edges?.length) return [];
-    const bySection = new Map();
-    for (const edge of edges) {
-      bySection.set(`${edge.from}|${edge.to}`, edge.id);
-      bySection.set(`${edge.to}|${edge.from}`, edge.id);
-    }
-    const ids = [];
-    for (let i = 0; i < route.length - 1; i += 1) {
-      const id = bySection.get(`${route[i]}|${route[i + 1]}`);
-      if (id) ids.push(id);
-    }
-    return ids;
-  }, [selectedTrain?.route, edges]);
+  const routeKey = selectedTrain?.route?.join(">") || "";
+
+  // Topology only: the station and section identities, not their per-tick
+  // array identities.
+  const topologyKey = useMemo(() => {
+    if (!stations?.length || !edges?.length) return "";
+    return `${stations.map((s) => s.id).join(",")}|${edges.map((e) => e.id).join(",")}`;
+  }, [stations, edges]);
 
   /* ------------------------------------------------------- scene lifecycle */
 
@@ -83,12 +92,21 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
     try {
       scene = new CorridorScene(canvasRef.current, {
         reducedMotion: prefersReducedMotion(),
+        onContextLost: () => setContextLost(true),
         // Beyond 2x the extra pixels cost more than they show.
         maxPixelRatio: window.innerWidth < 900 ? 1.5 : 2,
         antialias: window.innerWidth >= 900,
       });
     } catch (err) {
-      onFallback?.(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (generation > 0) {
+        // This is a rebuild after a context loss and the GPU is not ready yet.
+        // That is a temporary condition, not "this browser cannot do WebGL", so
+        // it keeps the retry on screen instead of abandoning the view.
+        setContextLost(true);
+        return undefined;
+      }
+      fallbackRef.current?.(message);
       return undefined;
     }
 
@@ -101,7 +119,11 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
       frames += 1;
       const now = performance.now();
       if (now - since >= 1000) {
-        setStats({ calls: engine.renderer.info.render.calls, fps: Math.round((frames * 1000) / (now - since)) });
+        setStats({
+          calls: engine.renderer.info?.render?.calls ?? 0,
+          fps: Math.round((frames * 1000) / (now - since)),
+          grid: engine.gridSpacingKm || 0,
+        });
         frames = 0;
         since = now;
       }
@@ -159,41 +181,56 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
         map.clear();
       }
     };
-  }, [webgl, onFallback]);
+  }, [webgl, generation]);
 
   /* ---------------------------------------------------------- data plumbing */
 
-  // Topology only: rebuilding track geometry is expensive, so it is keyed on
-  // the station and section identities rather than on every snapshot.
-  const topologyKey = useMemo(() => {
-    if (!stations?.length || !edges?.length) return "";
-    return `${stations.map((s) => s.id).join(",")}|${edges.map((e) => e.id).join(",")}`;
-  }, [stations, edges]);
-
   useEffect(() => {
     const scene = sceneRef.current;
-    if (!scene || !stations?.length || !edges?.length) return;
-    scene.setNetwork(stations, edges);
-  }, [topologyKey, stations, edges]);
+    const { stations: current, edges: currentEdges } = dataRef.current;
+    if (!scene || !current?.length || !currentEdges?.length) return;
+    // Keyed on the topology, never on the snapshot: rebuilding track geometry
+    // is the single most expensive thing this view does, and the station and
+    // section lists arrive as fresh arrays on every tick.
+    scene.setNetwork(current, currentEdges);
+    // `generation` is here because a rebuilt engine starts empty.
+  }, [topologyKey, generation]);
 
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene || !snapshot) return;
     scene.update(snapshot);
     syncLabelNodes(stations, trains, nodesRef.current, labelLayerRef.current, selectRef);
-  }, [snapshot, stations, trains]);
+  }, [snapshot, stations, trains, generation]);
+
+  // Re-apply view state after a rebuild without making the scene effect depend
+  // on values that change every tick.
 
   useEffect(() => {
-    sceneRef.current?.setSelection(selectedTrain?.id || null, routeEdgeIds);
-  }, [selectedTrain?.id, routeEdgeIds]);
+    const { edges: currentEdges } = dataRef.current;
+    const route = routeKey ? routeKey.split(">") : [];
+    const ids = [];
+    if (route.length > 1 && currentEdges?.length) {
+      const bySection = new Map();
+      for (const edge of currentEdges) {
+        bySection.set(`${edge.from}|${edge.to}`, edge.id);
+        bySection.set(`${edge.to}|${edge.from}`, edge.id);
+      }
+      for (let i = 0; i < route.length - 1; i += 1) {
+        const id = bySection.get(`${route[i]}|${route[i + 1]}`);
+        if (id) ids.push(id);
+      }
+    }
+    sceneRef.current?.setSelection(selectedTrain?.id || null, ids);
+  }, [selectedTrain?.id, routeKey, topologyKey, generation]);
 
   useEffect(() => {
     sceneRef.current?.setAltitude(altitude);
-  }, [altitude]);
+  }, [altitude, generation]);
 
   useEffect(() => {
     sceneRef.current?.setBasis(basis);
-  }, [basis]);
+  }, [basis, generation]);
 
   /* -------------------------------------------------------------- keyboard */
 
@@ -252,10 +289,33 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
         className="corridor-canvas"
         tabIndex={0}
         role="application"
-        aria-label="Corridor view. Arrow up and down change altitude, left and right rotate, G switches between the diagram and true geography."
+        aria-label="Corridor view. Arrow up and down change altitude between the region diagram and a single section, left and right rotate the view, and G switches between the control-room diagram and true geography."
         onKeyDown={onKeyDown}
       />
       <div className="corridor-labels" ref={labelLayerRef} aria-hidden="true" />
+
+      {contextLost && (
+        <div className="corridor-recover" role="alert">
+          <p className="fallback-title">The graphics context was lost</p>
+          <p className="fallback-body">
+            The GPU dropped this view, usually after a driver reset or the machine waking from
+            sleep. Nothing in the simulation was affected. The Geographic Network and Signal
+            Diagram tabs are unaffected too.
+          </p>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              setContextLost(false);
+              // The browser restores a lost context asynchronously; rebuilding
+              // in the same tick usually fails and bounces straight back here.
+              window.setTimeout(() => setGeneration((n) => n + 1), 350);
+            }}
+          >
+            Rebuild the corridor
+          </button>
+        </div>
+      )}
 
       <div className="corridor-hud">
         <div className="descent" role="group" aria-label="Descent">
@@ -309,12 +369,18 @@ export default function CorridorView({ snapshot, selectedTrain, onSelectTrain, o
       </div>
 
       <p className="corridor-stats" aria-hidden="true">
-        <span>{stats.fps} fps</span>
-        <span>{stats.calls} draw calls</span>
+        {stats.grid > 0 && <span>grid {formatKm(stats.grid)}</span>}
+        {stats.fps > 0 && <span>{stats.fps} fps</span>}
+        {stats.calls > 0 && <span>{stats.calls} draw calls</span>}
         {reduced && <span>reduced motion</span>}
       </p>
     </div>
   );
+}
+
+function formatKm(km) {
+  if (km >= 1) return `${km >= 10 ? Math.round(km) : km.toFixed(km % 1 ? 1 : 0)} km`;
+  return `${Math.round(km * 1000)} m`;
 }
 
 /* -------------------------------------------------------------- label layer */

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { buildBases, corridorCoordinates, mercator } from "../src/corridor/projection.js";
 import { buildAlignment, sampleAt, sampleSection, throughAxis } from "../src/corridor/alignment.js";
 import { attitude, createTrainMotion, integrate, reconcile, simMinutes } from "../src/corridor/physics.js";
-import { waveAt, WAVE_SPREAD, WAVE_GLSL } from "../src/corridor/wave.js";
+import { corridorAt, waveAt, WAVE_SPREAD, WAVE_GLSL } from "../src/corridor/wave.js";
 
 const STATIONS = [
   { id: "A", name: "A", lat: 28.64, lng: 77.22, x: 5, y: 45, type: "terminal", dwell_base: 5 },
@@ -327,4 +327,38 @@ test("the GLSL form embeds the same spread constant as the JS form", () => {
     WAVE_GLSL.includes(WAVE_SPREAD.toFixed(3)),
     "shader and CPU must share one definition or trains drift off the rails mid-morph"
   );
+});
+
+test("corridor coordinate interpolates linearly across a section", () => {
+  assert.equal(corridorAt(0.2, 0.6, 0), 0.2);
+  assert.equal(corridorAt(0.2, 0.6, 1), 0.6);
+  assert.ok(Math.abs(corridorAt(0.2, 0.6, 0.5) - 0.4) < 1e-12);
+});
+
+test("the morph phase genuinely differs along a section while the wave passes", () => {
+  // This is the invariant that keeps trains on the rails mid-transition. The
+  // GPU interpolates each vertex's corridor coordinate across the section, so
+  // the head and tail of a section are at different points in the morph. A
+  // train must be placed with the phase at its own position, not the phase at
+  // the station it left.
+  const from = 0.10;
+  const to = 0.60;
+  const origin = 0.10;
+  const progress = 0.35;
+
+  const atStart = waveAt(corridorAt(from, to, 0), origin, progress);
+  const atMid = waveAt(corridorAt(from, to, 0.5), origin, progress);
+  const atEnd = waveAt(corridorAt(from, to, 1), origin, progress);
+
+  assert.ok(atStart > atMid, "the near end of the section is further through the morph");
+  assert.ok(atMid > atEnd, "and the far end is behind it");
+  assert.ok(
+    atStart - atEnd > 0.2,
+    `the section must be visibly mid-deformation (got ${atStart - atEnd})`
+  );
+});
+
+test("once the wave has passed, every point on a section agrees", () => {
+  const settled = [0, 0.25, 0.5, 0.75, 1].map((f) => waveAt(corridorAt(0.1, 0.6, f), 0.1, 1));
+  for (const value of settled) assert.equal(value, 1);
 });

@@ -439,7 +439,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
     # The stream carries the full operational picture, so it needs the same
     # authentication as GET /state rather than being open to any caller.
     if auth_service.user_for_token(token) is None:
-        await websocket.close(code=1008)
+        # Accept first, then close with a policy code. Rejecting before the
+        # handshake completes only reaches the browser as an opaque 1006, so the
+        # console cannot tell "your session expired" from "the server is down".
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Invalid or expired token.")
         return
     await manager.connect(websocket)
     try:

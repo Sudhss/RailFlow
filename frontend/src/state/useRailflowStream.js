@@ -68,8 +68,36 @@ export function useRailflowStream(token, { onAuthExpired } = {}) {
       retryRef.current = Math.min(attempt + 1, 8);
       const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
       clearTimer();
-      timerRef.current = window.setTimeout(connect, delay);
+      timerRef.current = window.setTimeout(reconnect, delay);
     };
+
+    /**
+     * Before reconnecting, find out which failure this is.
+     *
+     * A socket that dies during the handshake reaches the browser as an opaque
+     * 1006 with no reason, so the close code alone cannot distinguish "the
+     * backend went away" from "the backend no longer accepts this token". One
+     * cheap REST call answers it: a 401 means the session is gone and retrying
+     * forever would just leave the operator staring at a console that will
+     * never come back.
+     */
+    async function reconnect() {
+      if (closedRef.current) return;
+      try {
+        await apiRequest("/auth/me");
+      } catch (error) {
+        if (error instanceof AuthExpiredError) {
+          setStatus("offline");
+          setError("Session is no longer valid. Sign in again.");
+          authExpiredRef.current?.();
+          return;
+        }
+        // Backend still unreachable: keep the retry ladder going.
+        scheduleReconnect();
+        return;
+      }
+      connect();
+    }
 
     function connect() {
       if (closedRef.current) return;
@@ -113,6 +141,7 @@ export function useRailflowStream(token, { onAuthExpired } = {}) {
         if (closedRef.current) return;
 
         // 1008 is the policy close the backend sends for a token it rejects.
+        // Anything else is ambiguous and is resolved by reconnect() below.
         if (event.code === 1008) {
           setStatus("offline");
           setError("Session is no longer valid. Sign in again.");
@@ -143,12 +172,21 @@ export function useRailflowStream(token, { onAuthExpired } = {}) {
       window.clearInterval(staleTimer);
       const active = socketRef.current;
       socketRef.current = null;
-      if (active) {
+      if (!active) return;
+
+      active.onmessage = null;
+      active.onerror = null;
+      active.onclose = null;
+
+      if (active.readyState === WebSocket.CONNECTING) {
+        // Closing a socket mid-handshake makes the browser log a warning and
+        // leaves the server with a half-open connection. Let it finish, then
+        // hang up cleanly. (React's development double-mount hits this on
+        // every mount.)
+        active.onopen = () => active.close(1000, "Client navigated away.");
+      } else {
         active.onopen = null;
-        active.onmessage = null;
-        active.onerror = null;
-        active.onclose = null;
-        active.close();
+        active.close(1000, "Client navigated away.");
       }
     };
   }, [token]);

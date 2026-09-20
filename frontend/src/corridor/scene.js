@@ -33,6 +33,7 @@
  */
 
 import {
+  BoxGeometry,
   BufferAttribute,
   BufferGeometry,
   Color,
@@ -57,7 +58,7 @@ import {
 import { buildBases, corridorCoordinates, WORLD_WIDTH } from "./projection.js";
 import { buildAlignment, sampleAt } from "./alignment.js";
 import { attitude, createTrainMotion, integrate, reconcile } from "./physics.js";
-import { waveAt, WAVE_GLSL } from "./wave.js";
+import { corridorAt, waveAt, WAVE_GLSL } from "./wave.js";
 
 /* ------------------------------------------------------------------ scale */
 
@@ -65,7 +66,7 @@ import { waveAt, WAVE_GLSL } from "./wave.js";
 export const UNITS_PER_KM = WORLD_WIDTH / 500;
 
 const GAUGE = 0.001676 * UNITS_PER_KM; // 1676 mm Indian broad gauge
-const RAIL_HEAD = 0.00007 * UNITS_PER_KM; // ~70 mm rail head
+const RAIL_HEAD = 0.00011 * UNITS_PER_KM; // rail head plus the web that catches light
 const FORMATION = 0.0045 * UNITS_PER_KM; // ~4.5 m formation width
 const PLATFORM_KM = 0.55; // ~550 m platform
 const COACH = 0.024 * UNITS_PER_KM; // ~24 m coach
@@ -75,21 +76,38 @@ const SLEEPER_SPACING = 0.0006 * UNITS_PER_KM; // 600 mm
 /** Diagram-altitude dimensions, chosen so the network reads as a drawing. */
 const DIAGRAM = { ballastHalf: 1.05, railHalf: 0.17, marker: 2.9, platform: 2.3 };
 
-const RAIL_DISTANCE = 0.62; // camera distance at rail level, corridor units
-const DIAGRAM_DISTANCE = 330;
+// Trackside shot at the bottom of the descent, in corridor units.
+// A film crew tracking a train does not stand a kilometre away: it runs
+// alongside, close enough that the gauge, the sleepers and the speed read.
+// The bottom of the descent: one train, the section under it, and the track
+// ahead as far as the next station.
+//
+// It stops here deliberately. Going closer -- down to sleeper spacing and rail
+// gauge -- looks impressive for a few seconds and then says nothing: a
+// dispatcher cannot act on ballast. At this height the operator can still read
+// the train's length, which section it occupies, how that section is running
+// and what it is approaching, which is the whole point of descending at all.
+const RAIL_SIDE = 0.18 * UNITS_PER_KM; //     ~180 m out from the running line
+const RAIL_HEIGHT = 0.10 * UNITS_PER_KM; //   ~100 m above rail head
+const RAIL_FORWARD = -0.26 * UNITS_PER_KM; // ~260 m behind the train's centre
+const RAIL_LOOK_AHEAD = 0.30 * UNITS_PER_KM; // aim ~300 m ahead of the centre
+const RAIL_DISTANCE = 0.45 * UNITS_PER_KM; //  scale for clip planes and fog
+const ROUTE_DISTANCE = 110 * UNITS_PER_KM; //  the mid stop: a train's whole route
+const DIAGRAM_MARGIN = 1.05; // breathing room around the region at full zoom-out
 
 /* ------------------------------------------------------------- appearance */
 
 const PALETTE = {
-  ballast: new Color("#191d20"),
+  ballast: new Color("#2e353a"),
   rail: new Color("#97a3aa"),
-  clear: new Color("#3fb27f"),
+  clear: new Color("#46525a"),
   caution: new Color("#d9a441"),
   danger: new Color("#d2564b"),
   closed: new Color("#7d3a34"),
   route: new Color("#dce5ea"),
-  ground: new Color("#0c0e10"),
-  ink: new Color("#1e262b"),
+  ground: new Color("#0a0c0e"),   // the ground plane
+  sky: new Color("#0e1215"),      // what sits above the horizon
+  ink: new Color("#1b2227"),
   platform: new Color("#48545c"),
   sleeper: new Color("#3a332b"),
 };
@@ -183,48 +201,70 @@ const TRACK_FRAGMENT = /* glsl */ `
     float onRoute = vState.b;
     float restricted = vState.a;
 
-    // Thresholds match the backend's own congestion classes so the picture and
-    // the event log never disagree about what "busy" means.
-    vec3 occupancy = uClear;
-    occupancy = mix(occupancy, uCaution, smoothstep(0.55, 0.75, load));
-    occupancy = mix(occupancy, uDanger, smoothstep(0.95, 1.15, load));
-    occupancy = mix(occupancy, uClosed, blocked);
+    // Clear track is the resting state of the whole network, so it stays
+    // neutral graphite. Colour is spent only where something is actually
+    // happening: approaching capacity, over capacity, or closed. Thresholds
+    // match the backend's own congestion classes, so the picture and the event
+    // log never disagree about what "busy" means.
+    float busy = smoothstep(0.55, 0.75, load);
+    float over = smoothstep(0.95, 1.15, load);
+
+    vec3 state = uClear;
+    state = mix(state, uCaution, busy);
+    state = mix(state, uDanger, over);
+    state = mix(state, uClosed, blocked);
+
+    // How loudly the state is allowed to speak.
+    float voice = max(max(busy * 0.75, over), max(blocked, restricted * 0.5));
 
     vec3 base;
     if (vKind < 0.5) {
-      float weight = 0.30 + 0.38 * uAltitude;
-      base = mix(uBallast, occupancy, weight);
-      base = mix(base, uRoute * 0.42, onRoute * 0.45);
+      base = mix(uBallast, state, voice * (0.55 + 0.35 * uAltitude));
+      base = mix(base, uRoute * 0.30, onRoute * 0.55);
     } else {
-      base = mix(uRail, occupancy, 0.16);
-      base = mix(base, uRoute, onRoute * 0.7);
+      base = mix(uRail, state, voice * 0.6);
+      base = mix(base, uRoute, onRoute * 0.75);
     }
-    base = mix(base, uCaution, restricted * 0.22);
 
     float fog = smoothstep(uFogNear, uFogFar, vDepth);
     gl_FragColor = vec4(mix(base, uFog, fog), 1.0);
+
+    // A custom ShaderMaterial does not get three's output encode for free. Without
+    // it every authored colour is written linear and displayed as sRGB, which is
+    // roughly a 2.2 gamma too dark.
+    #include <colorspace_fragment>
   }
 `;
 
 const GROUND_VERTEX = /* glsl */ `
   varying vec2 vLocal;
+  varying vec3 vView;
   uniform vec3 uOrigin;
   void main() {
     vLocal = position.xy;
     vec3 local = vec3(position.x, -0.0016, position.y);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(local - uOrigin, 1.0);
+    vec4 mv = modelViewMatrix * vec4(local - uOrigin, 1.0);
+    // The ground is two enormous triangles. Interpolating a scalar depth across
+    // them seams visibly along the shared diagonal, so the view-space position
+    // is carried instead and the depth is taken per fragment, where the
+    // interpolation is perspective-correct.
+    vView = mv.xyz;
+    gl_Position = projectionMatrix * mv;
   }
 `;
 
 const GROUND_FRAGMENT = /* glsl */ `
   precision highp float;
   varying vec2 vLocal;
+  varying vec3 vView;
 
   uniform float uMorph;
   uniform vec3  uInk;
   uniform vec3  uPaper;
   uniform float uSpacing;
   uniform float uFade;
+  uniform float uFogNear;
+  uniform float uFogFar;
 
   float grid(vec2 p, float spacing, float weight) {
     vec2 q = p / spacing;
@@ -243,7 +283,17 @@ const GROUND_FRAGMENT = /* glsl */ `
     float ink = mix(fine + coarse, geo, uMorph);
     float radius = length(vLocal);
     float vignette = 1.0 - smoothstep(FADE_START, FADE_END, radius);
-    gl_FragColor = vec4(mix(uPaper, uInk, clamp(ink, 0.0, 1.0) * uFade * vignette), 1.0);
+
+    // Without this the ground keeps its grid all the way to the edge of the
+    // plane, and low down the operator can see the end of the world.
+    float fog = smoothstep(uFogNear, uFogFar, -vView.z);
+    vec3 colour = mix(uPaper, uInk, clamp(ink, 0.0, 1.0) * uFade * vignette);
+    gl_FragColor = vec4(mix(colour, uPaper, fog), 1.0);
+
+    // A custom ShaderMaterial does not get three's output encode for free. Without
+    // it every authored colour is written linear and displayed as sRGB, which is
+    // roughly a 2.2 gamma too dark.
+    #include <colorspace_fragment>
   }
 `
   .replace("FADE_START", (WORLD_WIDTH * 0.42).toFixed(1))
@@ -252,16 +302,46 @@ const GROUND_FRAGMENT = /* glsl */ `
 const INSTANCE_VERTEX = /* glsl */ `
   attribute vec3 aTint;
   varying vec3 vTint;
+  varying float vShade;
+  varying float vDepth;
+
+  uniform vec3 uFog;
+  uniform float uFogNear;
+  uniform float uFogFar;
+
   void main() {
     vTint = aTint;
-    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+
+    // One hemispheric term, evaluated per vertex. Enough to give a coach body
+    // and a platform edge some form without lights or a shading model.
+    vec3 worldNormal = normalize(mat3(instanceMatrix) * normal);
+    vShade = 0.62 + 0.38 * clamp(dot(worldNormal, normalize(vec3(0.35, 1.0, 0.2))), 0.0, 1.0);
+
+    vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    vDepth = -mv.z;
+    gl_Position = projectionMatrix * mv;
   }
 `;
 
 const INSTANCE_FRAGMENT = /* glsl */ `
   precision highp float;
   varying vec3 vTint;
-  void main() { gl_FragColor = vec4(vTint, 1.0); }
+  varying float vShade;
+  varying float vDepth;
+
+  uniform vec3 uFog;
+  uniform float uFogNear;
+  uniform float uFogFar;
+
+  void main() {
+    float fog = smoothstep(uFogNear, uFogFar, vDepth);
+    gl_FragColor = vec4(mix(vTint * vShade, uFog, fog), 1.0);
+
+    // A custom ShaderMaterial does not get three's output encode for free. Without
+    // it every authored colour is written linear and displayed as sRGB, which is
+    // roughly a 2.2 gamma too dark.
+    #include <colorspace_fragment>
+  }
 `;
 
 /* ------------------------------------------------------------------ utils */
@@ -276,6 +356,20 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+/** Round up to the next 1, 2 or 5 times a power of ten. */
+function niceStep(value) {
+  const safe = Math.max(1e-6, value);
+  const decade = Math.pow(10, Math.floor(Math.log10(safe)));
+  const scaled = safe / decade;
+  const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+  return step * decade;
+}
+
+function smoothstep01(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0 || 1)));
+  return t * t * (3 - 2 * t);
+}
+
 /* ------------------------------------------------------------------ scene */
 
 export class CorridorScene {
@@ -283,7 +377,9 @@ export class CorridorScene {
     this.canvas = canvas;
     this.reducedMotion = Boolean(options.reducedMotion);
     this.onFrame = options.onFrame || null;
+    this.onContextLost = options.onContextLost || null;
     this.maxPixelRatio = options.maxPixelRatio ?? 2;
+    this.contextLost = false;
 
     this.renderer = new WebGLRenderer({
       canvas,
@@ -291,7 +387,9 @@ export class CorridorScene {
       alpha: false,
       powerPreference: "high-performance",
     });
-    this.renderer.setClearColor(PALETTE.ground.getHex(), 1);
+    // A sky marginally lighter than the ground gives a real horizon without
+    // painting one: the two planes simply separate in tone.
+    this.renderer.setClearColor(PALETTE.sky.getHex(), 1);
 
     this.scene = new Scene();
     this.camera = new PerspectiveCamera(46, 1, 0.01, 4000);
@@ -330,7 +428,23 @@ export class CorridorScene {
     this._running = false;
     this._furnitureKey = "";
     this._sleeperLocals = [];
-    this._cameraDistance = DIAGRAM_DISTANCE;
+    this._extent = null;
+    this._cameraDistance = 1;
+
+    // A GPU can take the context away at any time: a driver reset, the machine
+    // sleeping, or simply too many WebGL tabs. Without this the canvas goes
+    // black for good and the next frame throws inside the renderer.
+    this._onContextLost = (event) => {
+      event.preventDefault();
+      this.contextLost = true;
+      this.stop();
+      this.onContextLost?.();
+    };
+    this._onContextRestored = () => {
+      this.contextLost = false;
+    };
+    canvas.addEventListener("webglcontextlost", this._onContextLost, false);
+    canvas.addEventListener("webglcontextrestored", this._onContextRestored, false);
 
     this._buildGround();
     this._buildInstances();
@@ -353,6 +467,8 @@ export class CorridorScene {
 
   dispose() {
     this.stop();
+    this.canvas.removeEventListener("webglcontextlost", this._onContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored);
     this.scene.traverse((child) => {
       if (child.geometry) child.geometry.dispose();
       disposeMaterial(child.material);
@@ -385,7 +501,13 @@ export class CorridorScene {
         uPaper: { value: PALETTE.ground.clone() },
         uSpacing: { value: WORLD_WIDTH / 52 },
         uFade: { value: 1 },
+        uFogNear: { value: 400 },
+        uFogFar: { value: 1600 },
       },
+      // The shader lays the plane down by swapping its Y and Z, which reverses
+      // the winding: on FrontSide the ground is back-face culled from above and
+      // never draws at all.
+      side: DoubleSide,
     });
     this.ground = new Mesh(geometry, this.groundMaterial);
     this.ground.frustumCulled = false;
@@ -398,6 +520,11 @@ export class CorridorScene {
       vertexShader: INSTANCE_VERTEX,
       fragmentShader: INSTANCE_FRAGMENT,
       side: DoubleSide,
+      uniforms: {
+        uFog: { value: PALETTE.sky.clone() },
+        uFogNear: { value: 400 },
+        uFogFar: { value: 1600 },
+      },
     });
     const mesh = new InstancedMesh(geometry, material, capacity);
     mesh.count = 0;
@@ -419,7 +546,12 @@ export class CorridorScene {
 
     this.stationMesh = this._instanced(slab(), 128, 1);
     this.sleeperMesh = this._instanced(slab(), 1400, 0);
-    this.trainMesh = this._instanced(slab(), 128, 4);
+
+    // A train has a body. A flat ribbon disappears edge-on the moment the
+    // camera drops to rail level, which is exactly where it matters most.
+    const body = new BoxGeometry(1, 1, 1);
+    body.translate(0, 0.5, 0);
+    this.trainMesh = this._instanced(body, 128, 4);
 
     const mast = new CylinderGeometry(1, 1, 1, 6, 1, false);
     mast.translate(0, 0.5, 0);
@@ -441,6 +573,7 @@ export class CorridorScene {
       geographic: buildAlignment(stations, edges, this.bases.geographic),
     };
 
+    this._measureExtent();
     this._buildTrackGeometry();
     this._buildEdgeStateTexture();
 
@@ -448,6 +581,47 @@ export class CorridorScene {
     this.focus.copy(centre);
     this.targetFocus.copy(centre);
     this.origin.copy(centre);
+  }
+
+  /** Half-extent of the region on each axis, taking the wider of the two bases. */
+  _measureExtent() {
+    let halfX = 1;
+    let halfZ = 1;
+    for (const basis of [this.bases.schematic, this.bases.geographic]) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+      for (const id of this.bases.order) {
+        const p = basis[id];
+        if (!p) continue;
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.z);
+        maxZ = Math.max(maxZ, p.z);
+      }
+      if (Number.isFinite(minX)) {
+        halfX = Math.max(halfX, (maxX - minX) / 2);
+        halfZ = Math.max(halfZ, (maxZ - minZ) / 2);
+      }
+    }
+    this._extent = { halfX, halfZ };
+  }
+
+  /**
+   * How far back the camera has to be for the whole region to fit.
+   *
+   * Derived from the region's real extent and the current viewport rather than
+   * hard-coded, so the corridor is never clipped: not on a wide screen, not on
+   * a narrow one, and not after a section is added to the graph at runtime.
+   */
+  _diagramDistance() {
+    const extent = this._extent || { halfX: WORLD_WIDTH / 2, halfZ: WORLD_WIDTH / 6 };
+    const halfFov = (this.camera.fov * Math.PI) / 360;
+    const aspect = this.camera.aspect || 1;
+    const vertical = extent.halfZ / Math.tan(halfFov);
+    const horizontal = extent.halfX / (Math.tan(halfFov) * aspect);
+    return Math.max(vertical, horizontal) * DIAGRAM_MARGIN;
   }
 
   _networkCentre() {
@@ -694,8 +868,13 @@ export class CorridorScene {
 
   _trainPlacement(train, motion) {
     if (!train.on_edge || !train.edge_id) {
-      const p = this._stationLocal(train.current_node || train.source);
-      return { x: p.x, z: p.z, heading: this.heading, curvature: 0 };
+      // Standing at a station. It still has a direction: the section it is
+      // booked to take next, or failing that the one it arrived on. Without
+      // this the lineside camera has no heading to align to and ends up
+      // pointing at empty ground while a train sits in a platform.
+      const node = train.current_node || train.source;
+      const p = this._stationLocal(node);
+      return { x: p.x, z: p.z, heading: this._headingAtStation(train, node), curvature: 0 };
     }
 
     const s = this.alignments.schematic[train.edge_id];
@@ -713,7 +892,15 @@ export class CorridorScene {
 
     const sa = sampleAt(s, f);
     const ga = sampleAt(g, f);
-    const m = this._currentMorphAt(this.corridor[train.current_node] ?? 0.5);
+
+    // The shader gives every track vertex its own corridor coordinate,
+    // interpolated from one end of the section to the other, so the morph phase
+    // varies *along* a section. A train has to use the phase at its own point
+    // on that section, not the phase at the station it left, or it drifts off
+    // the rails while the wave is passing through.
+    const cFrom = this.corridor[edge?.from] ?? 0.5;
+    const cTo = this.corridor[edge?.to] ?? 0.5;
+    const m = this._currentMorphAt(corridorAt(cFrom, cTo, f));
 
     const x = lerp(sa.position.x, ga.position.x, m);
     const z = lerp(sa.position.z, ga.position.z, m);
@@ -730,6 +917,47 @@ export class CorridorScene {
       heading: Math.atan2(tx, tz),
       curvature: lerp(sa.curvature, ga.curvature, m) * (reversed ? -1 : 1),
     };
+  }
+
+  /** The section a standing train will occupy next, if there is one. */
+  _nextSectionOf(train) {
+    const route = Array.isArray(train.route) ? train.route : [];
+    const node = train.current_node || train.source;
+    const index = route.indexOf(node);
+    const neighbours = [route[index + 1], index > 0 ? route[index - 1] : null];
+    for (const other of neighbours) {
+      if (!other) continue;
+      for (const edge of this.edges) {
+        if (
+          (edge.from === node && edge.to === other) ||
+          (edge.to === node && edge.from === other)
+        ) {
+          return edge.id;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Direction a standing train faces: its next section, else its last one. */
+  _headingAtStation(train, node) {
+    const route = Array.isArray(train.route) ? train.route : [];
+    const index = route.indexOf(node);
+    const ahead = index >= 0 ? route[index + 1] : null;
+    const behind = index > 0 ? route[index - 1] : null;
+
+    for (const [other, sign] of [
+      [ahead, 1],
+      [behind, -1],
+    ]) {
+      if (!other) continue;
+      const here = this._stationLocal(node);
+      const there = this._stationLocal(other);
+      const dx = (there.x - here.x) * sign;
+      const dz = (there.z - here.z) * sign;
+      if (Math.hypot(dx, dz) > 1e-6) return Math.atan2(dx, dz);
+    }
+    return this.heading;
   }
 
   /** Screen position of a local point, for DOM labels. Null when off-screen. */
@@ -770,6 +998,7 @@ export class CorridorScene {
   /* ------------------------------------------------------------ frame loop */
 
   _tick(time) {
+    if (this.contextLost) return;
     const now = time / 1000;
     const dt = this._lastTime ? Math.min(0.1, now - this._lastTime) : 1 / 60;
     this._lastTime = now;
@@ -825,40 +1054,106 @@ export class CorridorScene {
       if (placement) {
         this.targetFocus.set(placement.x, 0, placement.z);
         // Below half altitude the camera commits to the train's own direction.
-        if (this.altitude < 0.55 && selected.on_edge) this.targetHeading = placement.heading;
+        // Stand behind the train: the camera azimuth is the reverse of the
+        // direction of travel, so descending swings the eye around into the
+        // train's own frame rather than cutting to it.
+        if (this.altitude < 0.55 && selected.on_edge) {
+          this.targetHeading = placement.heading + Math.PI;
+        }
       }
     } else {
       this.targetFocus.copy(this._networkCentre());
     }
 
-    // The eye has mass: it trails the target and settles rather than snapping.
-    const k = 1 - Math.exp(-(this.reducedMotion ? 1e6 : 2.4) * dt);
+    const a = this.altitude;
+
+    // The descent spans four orders of magnitude, from one section to a whole
+    // operating region. A single exponential over that range puts the midpoint
+    // at the geometric mean -- around 15 km -- which is neither scale anyone
+    // wants. So it is anchored in two halves: the lower half covers a section
+    // up to a train's whole route, the upper half covers a route up to the
+    // region.
+    const diagramDistance = this._diagramDistance();
+    const routeDistance = Math.min(diagramDistance * 0.45, ROUTE_DISTANCE);
+    const distance =
+      a <= 0.5
+        ? RAIL_DISTANCE * Math.pow(routeDistance / RAIL_DISTANCE, a / 0.5)
+        : routeDistance * Math.pow(diagramDistance / routeDistance, (a - 0.5) / 0.5);
+
+    // The eye has mass and trails its subject. But "how far behind" only means
+    // something relative to how far away the camera is: a lag that reads as
+    // inertia from the diagram puts the train off-screen at rail level. So the
+    // lag is damped in time and then hard-limited to a fraction of the current
+    // viewing distance. Inertia stays visible at altitude, and the subject
+    // stays framed all the way down, including mid-morph when the ground
+    // itself is moving.
+    const lambda = lerp(9, 2.4, Math.pow(a, 0.6));
+    const k = 1 - Math.exp(-(this.reducedMotion ? 1e6 : lambda) * dt);
     this.focus.x += (this.targetFocus.x - this.focus.x) * k;
     this.focus.z += (this.targetFocus.z - this.focus.z) * k;
-    this.origin.copy(this.focus);
 
-    const a = this.altitude;
-    const distance = RAIL_DISTANCE * Math.pow(DIAGRAM_DISTANCE / RAIL_DISTANCE, a);
-    const pitch = lerp(0.085, 1.35, Math.pow(a, 0.72));
-    const eyeHeight = lerp(GAUGE * 2.6, 0, Math.pow(a, 0.5));
+    const lagX = this.targetFocus.x - this.focus.x;
+    const lagZ = this.targetFocus.z - this.focus.z;
+    const lag = Math.hypot(lagX, lagZ);
+    const maxLag = distance * 0.18;
+    if (lag > maxLag) {
+      const pull = (lag - maxLag) / lag;
+      this.focus.x += lagX * pull;
+      this.focus.z += lagZ * pull;
+    }
+    this.origin.copy(this.focus);
+    // Two camera regimes, blended by altitude.
+    //
+    //   Plan   -- world-oriented, high and near-vertical, on the +Z side of the
+    //             region. (+Z matters: from -Z, lookAt builds a basis whose
+    //             screen-right is world -X, which silently mirrors the map and
+    //             puts Delhi east of Lucknow.)
+    //   Trackside -- train-oriented: alongside the running line, a few metres
+    //             up, trailing the train and aimed slightly ahead of it, which
+    //             is where the gauge, the sleepers and the speed become legible.
+    const rail = 1 - smoothstep01(0.06, 0.5, a);
+    const pitch = lerp(0.085, 1.49, Math.pow(a, 0.72));
+
+    const forwardX = Math.sin(this.heading);
+    const forwardZ = Math.cos(this.heading);
+    // Right-hand perpendicular of the direction of travel, in the ground plane.
+    const rightX = forwardZ;
+    const rightZ = -forwardX;
+
+    const planX = forwardX * Math.cos(pitch) * distance;
+    const planY = Math.sin(pitch) * distance;
+    const planZ = forwardZ * Math.cos(pitch) * distance;
+
+    const sideX = rightX * RAIL_SIDE + forwardX * RAIL_FORWARD;
+    const sideY = RAIL_HEIGHT;
+    const sideZ = rightZ * RAIL_SIDE + forwardZ * RAIL_FORWARD;
 
     this.camera.position.set(
-      -Math.sin(this.heading) * Math.cos(pitch) * distance,
-      Math.sin(pitch) * distance + eyeHeight,
-      -Math.cos(this.heading) * Math.cos(pitch) * distance
+      lerp(planX, sideX, rail),
+      lerp(planY, sideY, rail),
+      lerp(planZ, sideZ, rail)
     );
-    this.camera.lookAt(0, eyeHeight * 0.8, 0);
+
+    const lookAhead = RAIL_LOOK_AHEAD * rail;
+    this.camera.lookAt(forwardX * lookAhead, GAUGE * 1.6 * rail, forwardZ * lookAhead);
     this.camera.near = distance * 0.004;
     this.camera.far = distance * 26 + 8;
     this.camera.updateProjectionMatrix();
     this._cameraDistance = distance;
+
+    // How many world units one screen pixel covers at the focus. Everything
+    // drawn is sized as "its true size, but never thinner than N pixels", which
+    // is how a map keeps a road legible when zoomed out without pretending the
+    // road is a kilometre wide.
+    const height = this.viewport?.height || 600;
+    this._pixelSize = (2 * distance * Math.tan((this.camera.fov * Math.PI) / 360)) / height;
   }
 
   _updateUniforms() {
     const u = this.trackMaterial?.uniforms;
     if (!u) return;
     const a = this.altitude;
-    const t = Math.pow(a, 0.62);
+    const px = this._pixelSize || 0.001;
 
     u.uOrigin.value.copy(this.origin);
     u.uWaveOrigin.value = this.waveOrigin;
@@ -867,21 +1162,46 @@ export class CorridorScene {
     u.uMorphTo.value = this.morphTo;
     u.uAltitude.value = a;
 
-    // Formation and rails converge on true dimensions as the operator descends;
-    // at diagram altitude they open out into a readable drawn line.
-    u.uBallastHalf.value = lerp(FORMATION * 0.5, DIAGRAM.ballastHalf, t);
-    u.uRailHalf.value = lerp(RAIL_HEAD, DIAGRAM.railHalf, t);
-    u.uGauge.value = GAUGE * (1 - Math.pow(a, 0.28));
-    u.uRailLift.value = GAUGE * 0.09 * (1 - Math.pow(a, 0.28));
+    // The formation is 4.5 m wide and stays 4.5 m wide. When that is thinner
+    // than the minimum legible line it is drawn at the minimum instead, and the
+    // two rails close up into a single line, because at that distance the gauge
+    // is not information any more -- it is noise.
+    const trueBallast = FORMATION * 0.5;
+    const minBallast = px * 1.6;
+    u.uBallastHalf.value = Math.max(trueBallast, minBallast);
 
+    const closeness = Math.min(1, trueBallast / Math.max(minBallast, 1e-9));
+    u.uRailHalf.value = Math.max(RAIL_HEAD, px * 0.55);
+    u.uGauge.value = GAUGE * closeness;
+    u.uRailLift.value = GAUGE * 0.09 * closeness;
+    this._closeness = closeness;
+
+    // Atmosphere, not a curtain. Starting the fade close to the camera erased
+    // the ground before its grid could establish any sense of scale.
     const d = this._cameraDistance;
-    u.uFogNear.value = d * 1.4;
-    u.uFogFar.value = d * 7;
+    u.uFogNear.value = d * 3.5;
+    u.uFogFar.value = d * 22;
 
     const g = this.groundMaterial.uniforms;
     g.uOrigin.value.copy(this.origin);
     g.uMorph.value = this._currentMorphAt(0.5);
-    g.uFade.value = lerp(0.12, 1, Math.pow(a, 0.5));
+
+    // The ground grid is a scale bar, not wallpaper. Its spacing follows the
+    // viewing distance in 1-2-5 steps, the way a map's grid does, so there is
+    // always ground reference and parallax to judge speed against -- whether
+    // the operator is looking at the whole region or at one section.
+    this.gridSpacingKm = niceStep(this._cameraDistance / UNITS_PER_KM / 12);
+    g.uSpacing.value = this.gridSpacingKm * UNITS_PER_KM;
+    g.uFade.value = lerp(0.5, 0.85, Math.pow(a, 0.5));
+    g.uFogNear.value = u.uFogNear.value;
+    g.uFogFar.value = u.uFogFar.value;
+
+    for (const mesh of [this.stationMesh, this.trainMesh, this.sleeperMesh, this.signalMesh]) {
+      const m = mesh?.material?.uniforms;
+      if (!m) continue;
+      m.uFogNear.value = u.uFogNear.value;
+      m.uFogFar.value = u.uFogFar.value;
+    }
   }
 
   _setTint(mesh, index, color) {
@@ -894,21 +1214,19 @@ export class CorridorScene {
   _placeStations() {
     if (!this.stations.length) return;
     const o = this._obj;
-    const t = Math.pow(this.altitude, 0.7);
+    const px = this._pixelSize || 0.001;
     let i = 0;
 
     for (const station of this.stations) {
       if (i >= this.stationMesh.instanceMatrix.count) break;
       const p = this._stationLocal(station.id);
-      const diagram =
-        station.type === "terminal"
-          ? DIAGRAM.platform
-          : station.type === "junction"
-            ? DIAGRAM.platform * 0.72
-            : DIAGRAM.platform * 0.44;
+      // A real platform length, floored so a station never vanishes on the
+      // region diagram. Junctions and terminals hold a larger floor because
+      // they are what an operator navigates by.
       const real =
         PLATFORM_KM * UNITS_PER_KM * (station.type === "terminal" ? 1 : station.type === "minor" ? 0.45 : 0.75);
-      const length = lerp(real, diagram, t);
+      const floorPx = station.type === "terminal" ? 9 : station.type === "junction" ? 7 : 4;
+      const length = Math.max(real, px * floorPx);
 
       o.position.set(p.x - this.origin.x, 0.0006, p.z - this.origin.z);
       o.rotation.set(0, 0, 0);
@@ -926,7 +1244,7 @@ export class CorridorScene {
 
   _placeTrains() {
     const o = this._obj;
-    const t = Math.pow(this.altitude, 0.78);
+    const px = this._pixelSize || 0.001;
     const rake = COACH * RAKE_COACHES;
     let i = 0;
 
@@ -940,13 +1258,15 @@ export class CorridorScene {
       motion.cant = lerp(motion.cant, targetCant, this.reducedMotion ? 1 : 0.1);
       motion.pitch = lerp(motion.pitch, targetPitch, this.reducedMotion ? 1 : 0.1);
 
-      // A marker at diagram altitude becomes a true-length rake at rail level.
-      const length = lerp(rake, DIAGRAM.marker, t);
-      const width = lerp(GAUGE * 1.55, DIAGRAM.marker * 0.3, t);
+      // A true 336 m rake, floored so the train stays a visible mark on the
+      // region diagram rather than a sub-pixel speck.
+      const length = Math.max(rake, px * 10);
+      const width = Math.max(GAUGE * 1.55, px * 3.2);
+      const height = Math.max(0.0037 * UNITS_PER_KM, px * 1.2);
 
-      o.position.set(placement.x - this.origin.x, GAUGE * 0.22 + 0.0012, placement.z - this.origin.z);
+      o.position.set(placement.x - this.origin.x, GAUGE * 0.22 + 0.0006, placement.z - this.origin.z);
       o.rotation.set(motion.pitch, placement.heading, motion.cant);
-      o.scale.set(width, 1, length);
+      o.scale.set(width, height, length);
       o.updateMatrix();
       this.trainMesh.setMatrixAt(i, o.matrix);
 
@@ -966,7 +1286,7 @@ export class CorridorScene {
    * focus. They are rebuilt when the focused section changes, not per frame.
    */
   _placeFurniture() {
-    if (this.altitude > 0.42) {
+    if (this.altitude > 0.5) {
       this.sleeperMesh.count = 0;
       this.signalMesh.count = 0;
       this._furnitureKey = "";
@@ -974,7 +1294,9 @@ export class CorridorScene {
     }
 
     const selected = this.trains.find((t) => t.id === this.selectedTrainId);
-    const edgeId = selected?.edge_id || null;
+    // A standing train still needs track under it: fall back to the section it
+    // is booked to take next, so a platform view is not bare formation.
+    const edgeId = selected ? selected.edge_id || this._nextSectionOf(selected) : null;
     const key = `${edgeId}|${this.morphTo}|${this.waveProgress >= 1}`;
     if (key !== this._furnitureKey) {
       this._furnitureKey = key;
@@ -1069,10 +1391,13 @@ export class CorridorScene {
       // around the train is ever on screen at this altitude.
       const total = Math.round((km * UNITS_PER_KM) / SLEEPER_SPACING);
       const count = Math.min(capacity, total);
-      const m = this._currentMorphAt(0.5);
+      const edge = this.edges[this.edgeIndex.get(edgeId) ?? 0];
+      const cFrom = this.corridor[edge?.from] ?? 0.5;
+      const cTo = this.corridor[edge?.to] ?? 0.5;
 
       for (let i = 0; i < count; i += 1) {
         const f = total > 0 ? (i / total) : 0;
+        const m = this._currentMorphAt(corridorAt(cFrom, cTo, f));
         const sa = sampleAt(s, f);
         const ga = sampleAt(g, f);
         locals.push({

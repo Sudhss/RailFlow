@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AuthExpiredError } from "../api/client.js";
 
-export default function LoginView({ onLogin, notice }) {
+export default function LoginView({ onLogin, reason }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -62,9 +62,9 @@ export default function LoginView({ onLogin, notice }) {
           </button>
         </form>
 
-        {(error || notice?.message) && (
+        {(error || reason) && (
           <p className="signin-error" role="alert">
-            {error || notice.message}
+            {error || reason}
           </p>
         )}
 

@@ -29,6 +29,19 @@ export function waveAt(corridor, origin, progress) {
   return t * t * (3 - 2 * t); // smoothstep
 }
 
+/**
+ * The corridor coordinate of a point part-way along a section.
+ *
+ * The shader hands every track vertex its own corridor coordinate and the GPU
+ * interpolates it across the section, so the morph phase varies *along* a
+ * section while the wave is passing. Anything the CPU places on that track --
+ * trains, sleepers, signals -- has to use the phase at its own point, computed
+ * the same way, or it leaves the rails mid-transition.
+ */
+export function corridorAt(fromCorridor, toCorridor, fraction) {
+  return fromCorridor + (toCorridor - fromCorridor) * fraction;
+}
+
 /** The same function as GLSL, injected into the track shader. */
 export const WAVE_GLSL = /* glsl */ `
   uniform float uWaveOrigin;

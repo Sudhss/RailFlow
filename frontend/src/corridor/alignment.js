@@ -175,9 +175,12 @@ export function buildAlignment(stations, edges, positions) {
     const from = positions[edge.from];
     const to = positions[edge.to];
     if (!from || !to) continue;
-    // 60 km/h sections bend noticeably; 120 km/h sections stay nearly straight.
+    // Line speed sets the minimum radius a section can hold: a 60 km/h branch
+    // is allowed a noticeable bend, a 120 km/h main line stays close to
+    // straight. The range is deliberately narrow -- a real corridor is mostly
+    // tangent track with curves at the junctions, not a continuous snake.
     const speed = Number(edge.avg_speed) || 60;
-    const curvature = Math.max(0.12, Math.min(0.62, 1 - (speed - 40) / 110));
+    const curvature = Math.max(0.04, Math.min(0.30, (95 - speed) / 150));
     sections[edge.id] = sampleSection(from, to, axes[edge.from], axes[edge.to], curvature);
   }
   return sections;

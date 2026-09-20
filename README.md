@@ -48,6 +48,41 @@ The app runs at:
 http://127.0.0.1:5173
 ```
 
+## Verify
+
+Frontend (tests plus a production build):
+
+```powershell
+cd RailFlowrontend
+npm run verify
+```
+
+`npm test` alone runs the corridor geometry and physics tests with Node's built-in
+test runner, so no test dependency is installed.
+
+Backend simulation invariants:
+
+```powershell
+cd RailFlow
+python -m backend.selftest
+```
+
+Benchmark against the real etrain.info corridor data:
+
+```powershell
+cd RailFlow
+python -m backend.benchmark
+```
+
+## Configuration
+
+The console talks to `127.0.0.1:8000` by default. To point it at a backend
+elsewhere, set `VITE_API_HOST` at build or dev time:
+
+```powershell
+$env:VITE_API_HOST = "192.168.1.20:8000"; npm run dev
+```
+
 ## Local Users
 
 ```text

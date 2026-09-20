@@ -16,8 +16,8 @@ import { buildBases, corridorCoordinates } from "../corridor/projection.js";
  */
 
 const HISTORY_TICKS = 260;
-const HEIGHT = 132;
-const PAD = { top: 10, right: 12, bottom: 16, left: 46 };
+const HEIGHT = 108;
+const PAD = { top: 8, right: 12, bottom: 12, left: 44 };
 
 const STATUS_CLASS = {
   moving: "is-moving",
