@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .auth import AuthService, User
@@ -17,7 +22,21 @@ DATA_DIR = BASE_DIR / "data"
 MODEL_PATH = BASE_DIR / "models" / "railflow_ppo.zip"
 
 
-app = FastAPI(title="RailFlow API", version="1.0.0")
+logger = logging.getLogger("railflow")
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    task = asyncio.create_task(simulation_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="RailFlow API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -31,9 +50,14 @@ auth_service = AuthService(DATA_DIR / "users.json")
 state_lock = asyncio.Lock()
 
 
+@app.exception_handler(SimulationError)
+async def simulation_error_handler(_: Request, exc: SimulationError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+
+
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class LoginResponse(BaseModel):
@@ -42,53 +66,53 @@ class LoginResponse(BaseModel):
 
 
 class TrainAddRequest(BaseModel):
-    id: str
-    name: str | None = None
+    id: str = Field(min_length=1, max_length=32)
+    name: str | None = Field(default=None, max_length=64)
     type: str = "express"
-    priority: int | None = None
-    source: str
-    destination: str
-    scheduled_departure_tick: int = 0
-    max_speed: float | None = None
-    route: list[str] | None = None
+    priority: int | None = Field(default=None, ge=1, le=5)
+    source: str = Field(min_length=1, max_length=16)
+    destination: str = Field(min_length=1, max_length=16)
+    scheduled_departure_tick: int = Field(default=0, ge=0)
+    max_speed: float | None = Field(default=None, gt=0, le=250)
+    route: list[str] | None = Field(default=None, max_length=256)
 
 
 class TrainActionRequest(BaseModel):
-    train_id: str
+    train_id: str = Field(min_length=1, max_length=32)
 
 
 class ManualRouteRequest(BaseModel):
-    train_id: str
-    route: list[str]
+    train_id: str = Field(min_length=1, max_length=32)
+    route: list[str] = Field(min_length=1, max_length=256)
 
 
 class TrackAddRequest(BaseModel):
     id: str | None = None
     from_node: str = Field(alias="from")
     to_node: str = Field(alias="to")
-    distance_km: float
-    avg_speed: float
-    capacity: int
+    distance_km: float = Field(gt=0, le=2000)
+    avg_speed: float = Field(gt=0, le=350)
+    capacity: int = Field(ge=1, le=64)
     bidirectional: bool = True
 
     model_config = {"populate_by_name": True}
 
 
 class EdgeActionRequest(BaseModel):
-    edge_id: str
+    edge_id: str = Field(min_length=1, max_length=64)
 
 
 class SpeedRestrictionRequest(BaseModel):
-    edge_id: str
-    speed_limit: float | None = None
+    edge_id: str = Field(min_length=1, max_length=64)
+    speed_limit: float | None = Field(default=None, gt=0, le=350)
 
 
 class SimulationSpeedRequest(BaseModel):
-    seconds: float
+    seconds: float = Field(gt=0, le=60)
 
 
 class SeedScenarioRequest(BaseModel):
-    scenario: str = "mixed_peak"
+    scenario: str = Field(default="mixed_peak", min_length=1, max_length=64)
 
 
 class EmergencyHaltRequest(BaseModel):
@@ -96,19 +120,19 @@ class EmergencyHaltRequest(BaseModel):
 
 
 class CorridorHaltRequest(BaseModel):
-    edge_ids: list[str]
+    edge_ids: list[str] = Field(min_length=1, max_length=256)
 
 
 class IncidentAddRequest(BaseModel):
-    type: str
-    edge_id: str
-    severity: str = "warning"
-    speed_limit: float | None = None
-    note: str = ""
+    type: str = Field(min_length=1, max_length=48)
+    edge_id: str = Field(min_length=1, max_length=64)
+    severity: str = Field(default="warning", max_length=16)
+    speed_limit: float | None = Field(default=None, gt=0, le=350)
+    note: str = Field(default="", max_length=280)
 
 
 class IncidentResolveRequest(BaseModel):
-    incident_id: str
+    incident_id: str = Field(min_length=1, max_length=64)
 
 
 class ConnectionManager:
@@ -161,18 +185,32 @@ def handle_simulation_error(exc: SimulationError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.message)
 
 
-@app.on_event("startup")
-async def start_background_loop() -> None:
-    asyncio.create_task(simulation_loop())
-
-
 async def simulation_loop() -> None:
+    """Advance the simulation forever.
+
+    A failure inside one tick must not kill the loop: if this task dies the
+    whole console freezes while still reporting itself as live.
+    """
     while True:
-        async with state_lock:
-            simulation.advance_tick()
-            payload = {"type": "state_update", **simulation.snapshot()}
-            interval = simulation.tick_interval_seconds
-        await manager.broadcast(payload)
+        interval = simulation.tick_interval_seconds
+        try:
+            async with state_lock:
+                simulation.advance_tick()
+                payload = {"type": "state_update", **simulation.snapshot()}
+                interval = simulation.tick_interval_seconds
+            await manager.broadcast(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Simulation tick failed; continuing.")
+            async with state_lock:
+                simulation.logs.add(
+                    tick=simulation.tick,
+                    sim_time=simulation.sim_time,
+                    type="system_error",
+                    severity="critical",
+                    message="A simulation tick failed. The run continued from the last good state.",
+                )
         await asyncio.sleep(interval)
 
 
@@ -397,7 +435,12 @@ async def resolve_incident(
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket) -> None:
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
+    # The stream carries the full operational picture, so it needs the same
+    # authentication as GET /state rather than being open to any caller.
+    if auth_service.user_for_token(token) is None:
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     try:
         async with state_lock:
@@ -405,4 +448,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("WebSocket stream failed.")
+    finally:
         manager.disconnect(websocket)

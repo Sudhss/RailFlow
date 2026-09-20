@@ -8,11 +8,119 @@ from .agent import REROUTE_COOLDOWN_TICKS, AgentDecision, SafeRailAgent
 from .graph import Edge, RailwayGraph
 from .incidents import IncidentRegistry
 from .logs import LogBook
-from .train import Train, profile_for_train_type
+from .train import TRAIN_TYPE_PROFILES, Train, profile_for_train_type
 
 
 SIM_TICK_MINUTES = 1
+MAX_TRAIN_SPEED_KMH = 250.0
+MIN_TICK_INTERVAL_SECONDS = 0.2
+MAX_TICK_INTERVAL_SECONDS = 5.0
 
+
+
+DEFAULT_SCENARIO = "mixed_peak"
+
+# Incident taxonomy. Blocking types close the section outright; speed types
+# impose a limit and therefore require one.
+BLOCKING_INCIDENT_TYPES = frozenset({"track_closure", "signal_failure", "maintenance_block"})
+SPEED_INCIDENT_TYPES = frozenset({"speed_restriction", "weather_slowdown"})
+INCIDENT_TYPES = BLOCKING_INCIDENT_TYPES | SPEED_INCIDENT_TYPES
+INCIDENT_SEVERITIES = frozenset({"info", "warning", "critical"})
+
+# Seed scenarios the console offers. Exposed through the snapshot so the UI does
+# not carry its own copy of this list.
+SCENARIO_LIBRARY: dict[str, list[dict[str, Any]]] = {
+        "single_express": [
+            {
+                "id": "RF-900",
+                "name": "Control Express",
+                "type": "express",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 0,
+            }
+        ],
+        "bareilly_closure": [
+            {
+                "id": "RF-101",
+                "name": "Gomti Priority",
+                "type": "superfast",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 0,
+            },
+            {
+                "id": "RF-202",
+                "name": "Bareilly Passenger",
+                "type": "passenger",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 2,
+            },
+        ],
+        "kanpur_pressure": [
+            {
+                "id": "RF-301",
+                "name": "Kanpur Superfast",
+                "type": "superfast",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 0,
+                "route": ["NDLS", "DSA", "GZB", "KRJ", "ALJN", "HRS", "TDL", "FZD", "SKB", "ETW", "PHD", "CNB", "ON", "LKO"],
+            },
+            {
+                "id": "RF-302",
+                "name": "Kanpur Passenger",
+                "type": "passenger",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 1,
+                "route": ["NDLS", "DSA", "GZB", "KRJ", "ALJN", "HRS", "TDL", "FZD", "SKB", "ETW", "PHD", "CNB", "ON", "LKO"],
+            },
+            {
+                "id": "RF-303",
+                "name": "Kanpur Freight",
+                "type": "freight",
+                "source": "CNB",
+                "destination": "NDLS",
+                "scheduled_departure_tick": 2,
+            },
+        ],
+        "mixed_peak": [
+            {
+                "id": "RF-101",
+                "name": "Gomti Priority",
+                "type": "superfast",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 0,
+            },
+            {
+                "id": "RF-202",
+                "name": "Bareilly Passenger",
+                "type": "passenger",
+                "source": "NDLS",
+                "destination": "LKO",
+                "scheduled_departure_tick": 3,
+            },
+            {
+                "id": "RF-303",
+                "name": "Kanpur Freight",
+                "type": "freight",
+                "source": "CNB",
+                "destination": "NDLS",
+                "scheduled_departure_tick": 4,
+            },
+            {
+                "id": "RF-404",
+                "name": "Hardoi Local",
+                "type": "passenger",
+                "source": "LKO",
+                "destination": "MB",
+                "scheduled_departure_tick": 8,
+            },
+        ],
+}
 
 class SimulationError(Exception):
     def __init__(self, message: str, status_code: int = 400):
@@ -33,6 +141,9 @@ class RailFlowSimulation:
         self.paused = True
         self.emergency_halt_active = False
         self.tick_interval_seconds = 1.0
+        # The benchmark runs an agent-off baseline through this same tick
+        # loop, so both arms share identical movement physics.
+        self.agent_enabled = True
         self.last_agent_decision: dict[str, Any] | None = None
         self.logs.add(
             tick=self.tick,
@@ -71,9 +182,13 @@ class RailFlowSimulation:
             message="Simulation reset to the base railway graph.",
         )
 
-    def seed_scenario(self, scenario: str = "mixed_peak") -> None:
+    def seed_scenario(self, scenario: str = DEFAULT_SCENARIO) -> None:
+        scenario = scenario or DEFAULT_SCENARIO
+        if scenario not in SCENARIO_LIBRARY:
+            raise SimulationError(
+                f"Unknown scenario: {scenario}. Available: {', '.join(SCENARIO_LIBRARY)}."
+            )
         self.reset()
-        scenario = scenario or "mixed_peak"
         seeds = self._scenario_trains(scenario)
         for payload in seeds:
             self.add_train(payload)
@@ -99,7 +214,12 @@ class RailFlowSimulation:
         )
 
     def set_tick_interval(self, seconds: float) -> None:
-        self.tick_interval_seconds = min(5.0, max(0.2, float(seconds)))
+        value = float(seconds)
+        if not math.isfinite(value):
+            raise SimulationError("Tick interval must be a finite number of seconds.")
+        self.tick_interval_seconds = min(
+            MAX_TICK_INTERVAL_SECONDS, max(MIN_TICK_INTERVAL_SECONDS, value)
+        )
         self.logs.add(
             tick=self.tick,
             sim_time=self.sim_time,
@@ -112,29 +232,30 @@ class RailFlowSimulation:
         self.emergency_halt_active = active
         if active:
             for train in self.trains.values():
-                if train.status != "arrived":
-                    train.stop()
+                if train.departed and not train.complete:
+                    train.stop(reason="emergency_halt")
             self.logs.add(
                 tick=self.tick,
                 sim_time=self.sim_time,
                 type="emergency_halt",
                 severity="critical",
-                message="Emergency halt activated. All trains stopped immediately.",
+                message="Emergency halt activated. All running trains stopped immediately.",
             )
         else:
+            self._release_system_holds(self.occupancy())
             self.logs.add(
                 tick=self.tick,
                 sim_time=self.sim_time,
                 type="emergency_halt",
                 severity="info",
-                message="Emergency halt released. Dispatchers may resume trains.",
+                message="Emergency halt released. Held trains resume automatically.",
             )
 
     def corridor_halt(self, edge_ids: list[str]) -> None:
         target_edges = set(edge_ids)
         for train in self.trains.values():
             if train.edge_id in target_edges or self._route_intersects(train.route, target_edges):
-                train.stop()
+                train.stop(reason="corridor_halt")
         self.logs.add(
             tick=self.tick,
             sim_time=self.sim_time,
@@ -145,12 +266,17 @@ class RailFlowSimulation:
         )
 
     def add_train(self, payload: dict[str, Any]) -> Train:
-        train_id = payload["id"]
+        train_id = str(payload.get("id", "")).strip()
+        if not train_id:
+            raise SimulationError("Train id is required.")
         if train_id in self.trains:
             raise SimulationError(f"Duplicate train id: {train_id}", status_code=409)
 
         train_type = payload.get("type", "express")
-        profile = profile_for_train_type(train_type)
+        try:
+            profile = profile_for_train_type(train_type)
+        except ValueError as exc:
+            raise SimulationError(str(exc)) from exc
         source = payload["source"]
         destination = payload["destination"]
         if source not in self.graph.stations or destination not in self.graph.stations:
@@ -186,7 +312,21 @@ class RailFlowSimulation:
             raise SimulationError("No available route between source and destination.")
 
         priority = int(payload.get("priority", profile["priority"]))
+        if not 1 <= priority <= 5:
+            raise SimulationError("Train priority must be between 1 and 5.")
+
         max_speed = float(payload.get("max_speed", profile["max_speed"]))
+        if not math.isfinite(max_speed) or max_speed <= 0:
+            # A train with no speed never moves and never accrues delay, so it
+            # sits in the console as a permanently "moving" ghost.
+            raise SimulationError("Train max speed must be greater than zero.")
+        if max_speed > MAX_TRAIN_SPEED_KMH:
+            raise SimulationError(f"Train max speed cannot exceed {MAX_TRAIN_SPEED_KMH} km/h.")
+
+        departure = int(payload.get("scheduled_departure_tick", self.tick))
+        if departure < 0:
+            raise SimulationError("Scheduled departure tick cannot be negative.")
+
         train = Train(
             id=train_id,
             name=payload.get("name", train_id),
@@ -195,7 +335,7 @@ class RailFlowSimulation:
             source=source,
             destination=destination,
             route=route,
-            scheduled_departure_tick=int(payload.get("scheduled_departure_tick", self.tick)),
+            scheduled_departure_tick=departure,
             max_speed=max_speed,
             current_node=source,
         )
@@ -213,7 +353,8 @@ class RailFlowSimulation:
 
     def stop_train(self, train_id: str, reason: str = "manual_stop") -> Train:
         train = self._require_train(train_id)
-        train.stop()
+        # No hold reason: a dispatcher stop is only ever released by a dispatcher.
+        train.stop(reason=None)
         self.logs.add(
             tick=self.tick,
             sim_time=self.sim_time,
@@ -319,6 +460,7 @@ class RailFlowSimulation:
             message=f"Track {edge.id} reopened.",
             edge_id=edge.id,
         )
+        self._release_system_holds(self.occupancy())
         self.optimize_active_routes(reason="track_reopened")
         return edge
 
@@ -334,22 +476,43 @@ class RailFlowSimulation:
             details={"speed_limit": speed_limit},
         )
         if speed_limit is None:
+            self._release_system_holds(self.occupancy())
             self.optimize_active_routes(reason="speed_restriction_cleared")
         return edge
 
     def add_incident(self, payload: dict[str, Any]) -> dict[str, Any]:
+        incident_type = payload.get("type", "")
+        if incident_type not in INCIDENT_TYPES:
+            raise SimulationError(
+                f"Unknown incident type: {incident_type}. "
+                f"Available: {', '.join(sorted(INCIDENT_TYPES))}."
+            )
+        severity = payload.get("severity", "warning")
+        if severity not in INCIDENT_SEVERITIES:
+            raise SimulationError(
+                f"Unknown severity: {severity}. "
+                f"Available: {', '.join(sorted(INCIDENT_SEVERITIES))}."
+            )
+        speed_limit = payload.get("speed_limit")
+        if incident_type in SPEED_INCIDENT_TYPES:
+            if speed_limit is None:
+                raise SimulationError(
+                    f"A {incident_type} incident needs a speed limit in km/h."
+                )
+            if not math.isfinite(float(speed_limit)) or float(speed_limit) <= 0:
+                raise SimulationError("Incident speed limit must be greater than zero.")
         edge = self._require_edge(payload["edge_id"])
         incident = self.incidents.add(
-            type=payload["type"],
+            type=incident_type,
             edge_id=edge.id,
-            severity=payload.get("severity", "warning"),
+            severity=severity,
             created_tick=self.tick,
-            speed_limit=payload.get("speed_limit"),
+            speed_limit=speed_limit,
             note=payload.get("note", ""),
         )
-        if incident.type in {"track_closure", "signal_failure", "maintenance_block"}:
+        if incident.type in BLOCKING_INCIDENT_TYPES:
             edge.blocked = True
-        if incident.type in {"speed_restriction", "weather_slowdown"} and incident.speed_limit:
+        if incident.type in SPEED_INCIDENT_TYPES and incident.speed_limit:
             edge.speed_limit = incident.speed_limit
         self.logs.add(
             tick=self.tick,
@@ -369,9 +532,9 @@ class RailFlowSimulation:
 
         active_on_edge = self.incidents.active_for_edge(incident.edge_id)
         edge = self.graph.get_edge_by_id(incident.edge_id)
-        if edge and not any(item.type in {"track_closure", "signal_failure", "maintenance_block"} for item in active_on_edge):
+        if edge and not any(item.type in BLOCKING_INCIDENT_TYPES for item in active_on_edge):
             edge.blocked = False
-        if edge and not any(item.type in {"speed_restriction", "weather_slowdown"} for item in active_on_edge):
+        if edge and not any(item.type in SPEED_INCIDENT_TYPES for item in active_on_edge):
             edge.speed_limit = None
 
         self.logs.add(
@@ -382,13 +545,16 @@ class RailFlowSimulation:
             message=f"Incident {incident.id} resolved.",
             edge_id=incident.edge_id,
         )
+        self._release_system_holds(self.occupancy())
         self.optimize_active_routes(reason="incident_resolved")
         return incident.to_dict()
 
     def optimize_active_routes(self, reason: str = "network_optimized") -> int:
         optimized = 0
         for train in list(self.trains.values()):
-            if train.status == "arrived":
+            if train.status in {"arrived", "stopped"}:
+                # Held trains are handled by _release_system_holds, which knows
+                # the difference between a system hold and a dispatcher stop.
                 continue
             if self._optimize_train_route(train, reason):
                 optimized += 1
@@ -409,16 +575,72 @@ class RailFlowSimulation:
 
         self.tick += SIM_TICK_MINUTES
         if self.emergency_halt_active:
+            # A halt stops running trains. Trains that have not departed stay
+            # scheduled: they simply cannot depart while the halt is active, and
+            # must still be able to depart normally once it is released.
             for train in self.trains.values():
-                if train.status != "arrived":
-                    train.stop()
-                    train.delay += 1
+                if train.departed and not train.complete:
+                    train.stop(reason="emergency_halt")
+                    train.delay += SIM_TICK_MINUTES
             return
 
+        # One occupancy reading per tick keeps every train's speed decision based
+        # on the same network state and avoids recomputing it per train.
+        occupancy = self.occupancy()
+        self._release_system_holds(occupancy)
         for train in list(self.trains.values()):
-            self._advance_train(train)
+            self._advance_train(train, occupancy)
 
-        self._run_agent_once()
+        if self.agent_enabled:
+            self._run_agent_once()
+
+    def _release_system_holds(self, occupancy: dict[str, int]) -> None:
+        """Let trains held by the system continue once the cause has cleared.
+
+        A dispatcher stop is never released here, only holds the system itself
+        raised (blocked track, unroutable, agent hold, released halt).
+        """
+        for train in self.trains.values():
+            if not train.system_held:
+                continue
+            if train.on_edge:
+                edge = self.graph.get_edge_by_id(train.edge_id or "")
+                if edge is None or edge.blocked:
+                    continue
+                train.resume()
+                self.logs.add(
+                    tick=self.tick,
+                    sim_time=self.sim_time,
+                    type="hold_released",
+                    severity="info",
+                    message=f"{train.id} released; its track is clear again.",
+                    train_id=train.id,
+                    edge_id=edge.id,
+                )
+                continue
+
+            start_node = train.current_node
+            if start_node is None:
+                continue
+            route = self.graph.dijkstra(start_node, train.destination, occupancy)
+            if not route:
+                continue
+            train.resume()
+            try:
+                if route != self._route_tail(train, start_node):
+                    self._assign_route(train, route, source="system", reason="hold_released")
+                else:
+                    self._prepare_next_edge(train)
+            except SimulationError:
+                self._prepare_next_edge(train)
+            self.logs.add(
+                tick=self.tick,
+                sim_time=self.sim_time,
+                type="hold_released",
+                severity="info",
+                message=f"{train.id} released from hold at {start_node}.",
+                train_id=train.id,
+            )
 
     def occupancy(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -437,9 +659,17 @@ class RailFlowSimulation:
                 "emergency_halt_active": self.emergency_halt_active,
                 "tick_interval_seconds": self.tick_interval_seconds,
                 "sim_tick_minutes": SIM_TICK_MINUTES,
+                "agent_enabled": self.agent_enabled,
                 "agent_source": "ppo" if self.agent.model_available else "heuristic",
                 "agent_model_error": self.agent.load_error,
                 "reroute_cooldown_ticks": REROUTE_COOLDOWN_TICKS,
+                "sim_start": self.graph.sim_start,
+                "train_types": list(TRAIN_TYPE_PROFILES),
+                "scenarios": list(SCENARIO_LIBRARY),
+                "incident_types": sorted(INCIDENT_TYPES),
+                "speed_incident_types": sorted(SPEED_INCIDENT_TYPES),
+                "min_tick_interval_seconds": MIN_TICK_INTERVAL_SECONDS,
+                "max_tick_interval_seconds": MAX_TICK_INTERVAL_SECONDS,
             },
             "graph": self.graph.snapshot(occupancy),
             "trains": [train.to_dict() for train in self.trains.values()],
@@ -448,7 +678,7 @@ class RailFlowSimulation:
             "last_agent_decision": self.last_agent_decision,
         }
 
-    def _advance_train(self, train: Train) -> None:
+    def _advance_train(self, train: Train, occupancy: dict[str, int]) -> None:
         if train.status == "arrived":
             return
 
@@ -467,7 +697,7 @@ class RailFlowSimulation:
             return
 
         if train.status == "stopped":
-            train.delay += 1
+            train.delay += SIM_TICK_MINUTES
             train.current_speed = 0
             return
 
@@ -479,7 +709,7 @@ class RailFlowSimulation:
             return
 
         if train.status == "moving":
-            self._move_train_on_edge(train)
+            self._move_train_on_edge(train, occupancy)
 
     def _prepare_next_edge(self, train: Train) -> None:
         if train.route_index >= len(train.route) - 1:
@@ -509,43 +739,76 @@ class RailFlowSimulation:
         train.edge_progress = 0.0
         train.status = "moving"
 
-    def _move_train_on_edge(self, train: Train) -> None:
+    # A train may clear more than one short section inside a single tick. The
+    # integrator carries leftover travel time across node boundaries instead of
+    # discarding it, and this guard stops a pathological graph from spinning.
+    MAX_SECTIONS_PER_TICK = 8
+
+    def _move_train_on_edge(self, train: Train, occupancy: dict[str, int]) -> None:
         if not train.edge_id or not train.next_node:
             self._prepare_next_edge(train)
             return
 
-        edge = self.graph.get_edge_by_id(train.edge_id)
-        if edge is None or edge.blocked:
-            train.stop()
-            train.hold_at = train.next_node
-            train.delay += 1
-            self.logs.add(
-                tick=self.tick,
-                sim_time=self.sim_time,
-                type="route_unavailable",
-                severity="critical",
-                message=f"{train.id} stopped because its active track is blocked.",
-                train_id=train.id,
-                edge_id=train.edge_id,
-                details={"hold_at": train.hold_at},
-            )
-            return
+        # Congestion costs the train time once per tick, charged against the
+        # section it starts the tick on -- not once per section it clears.
+        start_edge = self.graph.get_edge_by_id(train.edge_id)
+        if start_edge is not None:
+            overload = occupancy.get(start_edge.id, 0) / max(1, start_edge.capacity) - 1.0
+            if overload > 0:
+                train.delay += max(1, math.ceil(overload))
 
-        occupancy = self.occupancy()
+        minutes_left = float(SIM_TICK_MINUTES)
+        for _ in range(self.MAX_SECTIONS_PER_TICK):
+            if minutes_left <= 1e-9 or train.status != "moving":
+                return
+            if not train.edge_id or not train.next_node:
+                self._prepare_next_edge(train)
+                return
+
+            edge = self.graph.get_edge_by_id(train.edge_id)
+            if edge is None or edge.blocked:
+                train.stop(reason="track_blocked")
+                train.hold_at = train.next_node
+                train.delay += SIM_TICK_MINUTES
+                self.logs.add(
+                    tick=self.tick,
+                    sim_time=self.sim_time,
+                    type="route_unavailable",
+                    severity="critical",
+                    message=f"{train.id} stopped because its active track is blocked.",
+                    train_id=train.id,
+                    edge_id=train.edge_id,
+                    details={"hold_at": train.hold_at},
+                )
+                return
+
+            speed = self._effective_speed(train, edge, occupancy)
+            train.current_speed = speed
+            if speed <= 0.0:
+                return
+
+            km_per_minute = speed / 60.0
+            km_to_node = max(0.0, (1.0 - train.edge_progress)) * edge.distance_km
+            km_available = km_per_minute * minutes_left
+
+            if km_available < km_to_node:
+                train.edge_progress += km_available / edge.distance_km
+                return
+
+            minutes_left -= km_to_node / km_per_minute
+            train.edge_progress = 1.0
+            self._arrive_at_next_station(train)
+
+    @staticmethod
+    def _effective_speed(train: Train, edge: Edge, occupancy: dict[str, int]) -> float:
+        """Track speed limit, train capability and congestion, in km/h. Pure."""
         load_ratio = occupancy.get(edge.id, 0) / max(1, edge.capacity)
         speed = min(train.max_speed, edge.effective_speed_limit)
         if load_ratio > 1:
             speed *= 1 / load_ratio
-            train.delay += max(1, math.ceil(load_ratio - 1))
         elif load_ratio >= 0.7:
             speed *= 0.85
-
-        train.current_speed = round(max(0.0, speed), 2)
-        distance_this_tick = train.current_speed / 60.0 * SIM_TICK_MINUTES
-        train.edge_progress += distance_this_tick / edge.distance_km
-
-        if train.edge_progress >= 1.0:
-            self._arrive_at_next_station(train)
+        return round(max(0.0, speed), 2)
 
     def _arrive_at_next_station(self, train: Train) -> None:
         arrived_node = train.next_node
@@ -575,10 +838,19 @@ class RailFlowSimulation:
             train.pending_reroute = False
             train.requested_route = None
 
-        if arrived_node in train.route:
-            train.route_index = train.route.index(arrived_node)
+        train.record_arrival(arrived_node)
+
+        # Search forward from the current index. Looking up the first occurrence
+        # in the whole route sends a train that revisits a station back to an
+        # earlier index, and it then loops between the two forever.
+        next_index = train.route_index + 1
+        if next_index < len(train.route) and train.route[next_index] == arrived_node:
+            train.route_index = next_index
         else:
-            train.route_index += 1
+            try:
+                train.route_index = train.route.index(arrived_node, train.route_index)
+            except ValueError:
+                train.route_index = min(next_index, max(0, len(train.route) - 1))
 
         if arrived_node == train.destination:
             self._prepare_next_edge(train)
@@ -613,10 +885,10 @@ class RailFlowSimulation:
         if decision.decision == "reroute" and decision.new_route:
             self._assign_route(train, decision.new_route, source=decision.source, reason=decision.reason)
         elif decision.decision == "hold":
-            train.stop()
+            train.stop(reason="agent_hold")
             train.hold_at = train.next_node or train.current_node
         elif decision.decision == "stop":
-            train.stop()
+            train.stop(reason="agent_capacity_relief")
 
         payload = decision.to_dict()
         train.last_agent_action = payload
@@ -690,8 +962,10 @@ class RailFlowSimulation:
             message = f"{train.id} reroute queued until arrival at {start_node}."
             log_type = "reroute_queued"
         else:
+            was_running = train.status in {"moving", "dwelling"}
             train.apply_route_from_node(new_route, self.tick)
-            self._prepare_next_edge(train)
+            if was_running:
+                self._prepare_next_edge(train)
             message = f"{train.id} rerouted."
             log_type = "reroute"
 
@@ -711,8 +985,7 @@ class RailFlowSimulation:
         )
 
     def _handle_route_unavailable(self, train: Train, hold_at: str) -> None:
-        train.status = "stopped"
-        train.current_speed = 0
+        train.stop(reason="route_unavailable")
         train.hold_at = hold_at
         self.logs.add(
             tick=self.tick,
@@ -745,99 +1018,7 @@ class RailFlowSimulation:
         return edge
 
     def _scenario_trains(self, scenario: str) -> list[dict[str, Any]]:
-        scenarios: dict[str, list[dict[str, Any]]] = {
-            "single_express": [
-                {
-                    "id": "RF-900",
-                    "name": "Control Express",
-                    "type": "express",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 0,
-                }
-            ],
-            "bareilly_closure": [
-                {
-                    "id": "RF-101",
-                    "name": "Gomti Priority",
-                    "type": "superfast",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 0,
-                },
-                {
-                    "id": "RF-202",
-                    "name": "Bareilly Passenger",
-                    "type": "passenger",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 2,
-                },
-            ],
-            "kanpur_pressure": [
-                {
-                    "id": "RF-301",
-                    "name": "Kanpur Superfast",
-                    "type": "superfast",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 0,
-                    "route": ["NDLS", "DSA", "GZB", "KRJ", "ALJN", "HRS", "TDL", "FZD", "SKB", "ETW", "PHD", "CNB", "ON", "LKO"],
-                },
-                {
-                    "id": "RF-302",
-                    "name": "Kanpur Passenger",
-                    "type": "passenger",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 1,
-                    "route": ["NDLS", "DSA", "GZB", "KRJ", "ALJN", "HRS", "TDL", "FZD", "SKB", "ETW", "PHD", "CNB", "ON", "LKO"],
-                },
-                {
-                    "id": "RF-303",
-                    "name": "Kanpur Freight",
-                    "type": "freight",
-                    "source": "CNB",
-                    "destination": "NDLS",
-                    "scheduled_departure_tick": 2,
-                },
-            ],
-            "mixed_peak": [
-                {
-                    "id": "RF-101",
-                    "name": "Gomti Priority",
-                    "type": "superfast",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 0,
-                },
-                {
-                    "id": "RF-202",
-                    "name": "Bareilly Passenger",
-                    "type": "passenger",
-                    "source": "NDLS",
-                    "destination": "LKO",
-                    "scheduled_departure_tick": 3,
-                },
-                {
-                    "id": "RF-303",
-                    "name": "Kanpur Freight",
-                    "type": "freight",
-                    "source": "CNB",
-                    "destination": "NDLS",
-                    "scheduled_departure_tick": 4,
-                },
-                {
-                    "id": "RF-404",
-                    "name": "Hardoi Local",
-                    "type": "passenger",
-                    "source": "LKO",
-                    "destination": "MB",
-                    "scheduled_departure_tick": 8,
-                },
-            ],
-        }
-        return scenarios.get(scenario, scenarios["mixed_peak"])
+        return SCENARIO_LIBRARY.get(scenario, SCENARIO_LIBRARY[DEFAULT_SCENARIO])
 
     def _scenario_incidents(self, scenario: str) -> list[dict[str, Any]]:
         if scenario == "bareilly_closure":

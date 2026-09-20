@@ -1,38 +1,87 @@
-import * as d3 from "d3";
 import { useMemo, useState } from "react";
 
-const WIDTH = 1080;
-const HEIGHT = 620;
-const PAD_X = 50;
-const PAD_Y = 48;
+/**
+ * The geographic network, drawn flat.
+ *
+ * This is the console's second opinion and its WebGL fallback: the same
+ * sections, states and train positions, rendered as SVG so the picture survives
+ * a machine with no usable GPU and prints as a diagram.
+ *
+ * It used to pull all of d3 in to call scaleLinear and extent. Two linear
+ * mappings do not need a charting library, so the scales are computed here and
+ * the dependency is gone.
+ */
 
-export default function GraphView({ stations, edges, trains, selectedTrain, onSelectTrain }) {
-  const [hoveredTrain, setHoveredTrain] = useState(null);
+const WIDTH = 1080;
+const HEIGHT = 600;
+const PAD_X = 54;
+const PAD_Y = 46;
+
+export default function GraphView({ stations, edges, trains, selectedTrain, onSelectTrain, notice }) {
+  const [hovered, setHovered] = useState(null);
   const geometry = useMemo(() => buildGeometry(stations), [stations]);
-  const selectedRouteEdges = useMemo(() => routeEdgeIds(selectedTrain, edges), [selectedTrain, edges]);
+
+  const edgeLookup = useMemo(() => {
+    const map = new Map();
+    for (const edge of edges) {
+      map.set(`${edge.from}|${edge.to}`, edge);
+      map.set(`${edge.to}|${edge.from}`, edge);
+    }
+    return map;
+  }, [edges]);
+
+  // Precomputed once per render instead of scanning every edge per route leg.
+  const routeEdges = useMemo(() => {
+    const route = selectedTrain?.route;
+    if (!route?.length) return new Set();
+    const ids = new Set();
+    for (let i = 0; i < route.length - 1; i += 1) {
+      const edge = edgeLookup.get(`${route[i]}|${route[i + 1]}`);
+      if (edge) ids.add(edge.id);
+    }
+    return ids;
+  }, [selectedTrain?.route, edgeLookup]);
+
+  const travelled = useMemo(() => {
+    const history = selectedTrain?.history;
+    if (!history?.length) return new Set();
+    const ids = new Set();
+    for (let i = 0; i < history.length - 1; i += 1) {
+      const edge = edgeLookup.get(`${history[i]}|${history[i + 1]}`);
+      if (edge) ids.add(edge.id);
+    }
+    return ids;
+  }, [selectedTrain?.history, edgeLookup]);
+
+  if (!stations.length) {
+    return (
+      <div className="flat-view flat-view--empty" role="status">
+        <p className="empty-title">No railway graph loaded</p>
+        <p className="empty-body">
+          The console has not received a station list from the simulation yet.
+        </p>
+      </div>
+    );
+  }
+
+  const hoveredTrain = hovered && trains.find((train) => train.id === hovered);
 
   return (
-    <div className="graph-shell">
-      <svg className="network-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Geographic railway graph">
-        <defs>
-          <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-            <path d="M 32 0 L 0 0 0 32" fill="none" stroke="rgba(220, 227, 214, 0.055)" strokeWidth="1" />
-          </pattern>
-          <filter id="trainGlow">
-            <feGaussianBlur stdDeviation="3" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        <rect width={WIDTH} height={HEIGHT} fill="url(#grid)" />
-        <g className="edge-layer">
+    <div className="flat-view">
+      {notice && <p className="flat-view-notice">{notice}</p>}
+      <svg
+        className="flat-svg"
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        role="img"
+        aria-label={`Geographic network: ${stations.length} stations, ${edges.length} sections, ${trains.length} trains`}
+      >
+        <g className="sections">
           {edges.map((edge) => {
             const from = geometry[edge.from];
             const to = geometry[edge.to];
             if (!from || !to) return null;
-            const active = selectedRouteEdges.has(edge.id);
+            const onRoute = routeEdges.has(edge.id);
+            const done = travelled.has(edge.id);
             return (
               <line
                 key={edge.id}
@@ -40,42 +89,58 @@ export default function GraphView({ stations, edges, trains, selectedTrain, onSe
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                className={`track-line ${edge.congestion} ${active ? "optimal" : ""}`}
-                strokeWidth={active ? 5 : edge.capacity > 2 ? 3.2 : 2.1}
-              />
+                className={`section section--${edge.congestion}${onRoute ? " is-route" : ""}${done ? " is-travelled" : ""}`}
+                strokeWidth={onRoute ? 4.5 : edge.capacity > 2 ? 2.8 : 1.9}
+              >
+                <title>
+                  {edge.id}: {edge.distance_km} km, {edge.trains_on_edge}/{edge.capacity} occupied
+                  {edge.blocked ? ", closed" : ""}
+                  {edge.speed_limit ? `, limited to ${edge.speed_limit} km/h` : ""}
+                </title>
+              </line>
             );
           })}
         </g>
-        <g className="station-layer">
+
+        <g className="nodes">
           {stations.map((station) => {
             const point = geometry[station.id];
             if (!point) return null;
+            const radius = station.type === "terminal" ? 6.5 : station.type === "junction" ? 5 : 3;
+            const named = station.type !== "minor";
             return (
-              <g key={station.id} className={`station-node ${station.type}`} transform={`translate(${point.x}, ${point.y})`}>
-                <circle r={station.type === "terminal" ? 8 : station.type === "junction" ? 6 : 4} />
-                <text x="9" y="-7">
-                  {station.id}
-                </text>
+              <g key={station.id} transform={`translate(${point.x} ${point.y})`} className={`node node--${station.type}`}>
+                <circle r={radius}>
+                  <title>
+                    {station.name} ({station.id})
+                  </title>
+                </circle>
+                {named && (
+                  <text x={radius + 4} y={-radius - 2}>
+                    {station.id}
+                  </text>
+                )}
               </g>
             );
           })}
         </g>
-        <g className="train-layer">
+
+        <g className="marks">
           {trains.map((train) => {
-            const position = trainPosition(train, edges, geometry);
-            if (!position) return null;
+            const point = trainPosition(train, geometry);
+            if (!point) return null;
             const selected = selectedTrain?.id === train.id;
             return (
               <g
                 key={train.id}
-                className={`train-dot ${train.status} ${selected ? "selected" : ""}`}
-                transform={`translate(${position.x}, ${position.y})`}
-                onMouseEnter={() => setHoveredTrain(train)}
-                onMouseLeave={() => setHoveredTrain(null)}
+                transform={`translate(${point.x} ${point.y})`}
+                className={`mark mark--${train.status}${selected ? " is-selected" : ""}`}
+                onMouseEnter={() => setHovered(train.id)}
+                onMouseLeave={() => setHovered(null)}
                 onClick={() => onSelectTrain(train.id)}
               >
-                <circle r={selected ? 8 : 6} filter="url(#trainGlow)" />
-                <text x="10" y="4">
+                <circle r={selected ? 6.5 : 4.5} />
+                <text x="9" y="4">
                   {train.id}
                 </text>
               </g>
@@ -83,74 +148,91 @@ export default function GraphView({ stations, edges, trains, selectedTrain, onSe
           })}
         </g>
       </svg>
-      <div className="map-legend">
-        <span><i className="legend normal" />Normal</span>
-        <span><i className="legend busy" />Busy</span>
-        <span><i className="legend congested" />Congested</span>
-        <span><i className="legend closed" />Closed</span>
-        <span><i className="legend optimal" />Selected route</span>
-      </div>
+
+      <ul className="legend">
+        <li>
+          <i className="swatch swatch--normal" />
+          Clear
+        </li>
+        <li>
+          <i className="swatch swatch--busy" />
+          Busy
+        </li>
+        <li>
+          <i className="swatch swatch--congested" />
+          Over capacity
+        </li>
+        <li>
+          <i className="swatch swatch--closed" />
+          Closed
+        </li>
+        <li>
+          <i className="swatch swatch--route" />
+          Selected route
+        </li>
+      </ul>
+
       {hoveredTrain && (
-        <div className="hover-card">
-          <strong>{hoveredTrain.id}</strong>
-          <span>{hoveredTrain.type} to {hoveredTrain.destination}</span>
-          <span>{Math.round(hoveredTrain.current_speed)} km/h</span>
-          <span>{hoveredTrain.delay} min delay</span>
-        </div>
+        <dl className="hover-facts">
+          <div>
+            <dt>Train</dt>
+            <dd className="mono">{hoveredTrain.id}</dd>
+          </div>
+          <div>
+            <dt>Speed</dt>
+            <dd className="mono">{Math.round(hoveredTrain.current_speed)} km/h</dd>
+          </div>
+          <div>
+            <dt>Delay</dt>
+            <dd className="mono">{hoveredTrain.delay} min</dd>
+          </div>
+          <div>
+            <dt>To</dt>
+            <dd className="mono">{hoveredTrain.destination}</dd>
+          </div>
+        </dl>
       )}
     </div>
   );
 }
 
+/** A plain linear fit of the diagram coordinates into the viewport. */
 export function buildGeometry(stations) {
-  if (!stations.length) return {};
-  const xScale = d3
-    .scaleLinear()
-    .domain(d3.extent(stations, (station) => station.x))
-    .range([PAD_X, WIDTH - PAD_X]);
-  const yScale = d3
-    .scaleLinear()
-    .domain(d3.extent(stations, (station) => station.y))
-    .range([PAD_Y, HEIGHT - PAD_Y]);
-  return Object.fromEntries(
-    stations.map((station) => [
-      station.id,
-      {
-        x: xScale(station.x),
-        y: yScale(station.y),
-        station
-      }
-    ])
-  );
+  if (!stations?.length) return {};
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const station of stations) {
+    minX = Math.min(minX, station.x);
+    maxX = Math.max(maxX, station.x);
+    minY = Math.min(minY, station.y);
+    maxY = Math.max(maxY, station.y);
+  }
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+
+  const out = {};
+  for (const station of stations) {
+    out[station.id] = {
+      x: PAD_X + ((station.x - minX) / spanX) * (WIDTH - PAD_X * 2),
+      y: PAD_Y + ((station.y - minY) / spanY) * (HEIGHT - PAD_Y * 2),
+      station,
+    };
+  }
+  return out;
 }
 
-export function trainPosition(train, edges, geometry) {
+export function trainPosition(train, geometry) {
   if (train.on_edge && train.current_node && train.next_node) {
     const from = geometry[train.current_node];
     const to = geometry[train.next_node];
-    if (!from || !to) return null;
-    const progress = Math.max(0, Math.min(1, train.edge_progress || 0));
-    return {
-      x: from.x + (to.x - from.x) * progress,
-      y: from.y + (to.y - from.y) * progress
-    };
+    if (from && to) {
+      const progress = Math.max(0, Math.min(1, train.edge_progress || 0));
+      return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress };
+    }
   }
-  const station = geometry[train.current_node || train.source];
-  if (station) return { x: station.x, y: station.y };
-  const edge = edges.find((item) => item.id === train.edge_id);
-  if (!edge) return null;
-  return geometry[edge.from] || null;
-}
-
-function routeEdgeIds(train, edges) {
-  const route = train?.display_route || train?.route;
-  if (!route) return new Set();
-  const ids = new Set();
-  for (let index = 0; index < route.length - 1; index += 1) {
-    const from = route[index];
-    const to = route[index + 1];
-    const edge = edges.find((item) => (item.from === from && item.to === to) || (item.from === to && item.to === from));
-    if (edge) ids.add(edge.id);
-  }
-  return ids;
+  const station = geometry[train.current_node] || geometry[train.source];
+  return station ? { x: station.x, y: station.y } : null;
 }

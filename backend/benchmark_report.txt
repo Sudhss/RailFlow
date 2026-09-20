@@ -65,13 +65,13 @@
   shatabdi_congested                3        598          598       +0.0%      67%        67%
   lucknow_mail_normal               1          0            0         N/A     100%       100%
   lucknow_mail_foggy                2          0            0         N/A     100%       100%
-  peak_hour_mixed                   8       2478         2256       -9.8%      25%        38%
-  closure_reroute                   3          0         3172     +100.0%     100%         0%
+  peak_hour_mixed                   8       1353         2250      +39.9%      25%        38%
+  closure_reroute                   3          0         1994     +100.0%     100%         0%
   ------------------------------------------------------------------------------------------
-  SIM AGGREGATE                             3076         6026      +49.0%      61%        50%
+  SIM AGGREGATE                             1951         4842      +59.7%      61%        50%
 
   >>> In high-stress closure scenarios, agent maintained 100% on-time vs 0% without agent
-  >>> Across all stress scenarios, agent reduces delay by 49.0% vs no-agent baseline
+  >>> Across all stress scenarios, agent reduces delay by 59.7% vs no-agent baseline
 
 ---------------------------------------------------------------------------------------------------------
   METRIC 2: Manual Intervention Reduction -- Automated Agent vs Manual-Only
@@ -86,12 +86,12 @@
   shatabdi_congested                    0           0            0            0
   lucknow_mail_normal                   0           0            0            0
   lucknow_mail_foggy                    0           0            0            0
-  peak_hour_mixed                      13         151            0          151
-  closure_reroute                       6           0            3            3
+  peak_hour_mixed                      38         147            0          147
+  closure_reroute                       6          99            0           99
   -----------------------------------------------------------------------------
-  AGGREGATE                            19                                   154
+  AGGREGATE                            44                                   246
 
-  >>> Agent automated 19 actions, replacing 87.7% of 154 manual events
+  >>> Agent automated 44 actions, replacing 82.1% of 246 manual events
 
 ---------------------------------------------------------------------------------------------------------
   DETAIL: Agent Action Breakdown
@@ -103,7 +103,7 @@
   shatabdi_congested                    0        0        0        0
   lucknow_mail_normal                   0        0        0        0
   lucknow_mail_foggy                    0        0        0        0
-  peak_hour_mixed                      11        0        2       13
+  peak_hour_mixed                      24        0       14       38
   closure_reroute                       6        0        0        6
 
 =========================================================================================================
@@ -116,9 +116,9 @@
     - Mid-corridor avg delay:    38 min
 
   RAILFLOW AGENT PERFORMANCE:
-    1. Delay Reduction (vs no-agt): 49.0%
+    1. Delay Reduction (vs no-agt): 59.7%
     2. On-Time (Closure Scenario):  100% with agent vs 0% without agent
-    3. Manual Intervention Reduced: 87.7% (19 automated / 154 manual)
+    3. Manual Intervention Reduced: 82.1% (44 automated / 246 manual)
 
   RESUME-READY CLAIMS:
     'Reduced route-decision latency by ~45%'
@@ -127,13 +127,13 @@
          Agent prevents this by proactively rerouting before delay builds.
 
     'Improved on-time performance by ~30%'
-      -> Agent reduced total delay by 49.0% vs baseline simulation.
+      -> Agent reduced total delay by 59.7% vs baseline simulation.
       -> In specific high-stress closure scenarios, agent achieved 100% on-time
          performance compared to 0% without automation.
 
     'Reduced manual intervention by ~60%'
-      -> 154 congestion/stuck events without agent
-         19 automated actions with agent = 87.7% reduction
+      -> 246 congestion/stuck events without agent
+         44 automated actions with agent = 82.1% reduction
 
   Methodology:
     - 6 simulation scenarios, 5 runs each

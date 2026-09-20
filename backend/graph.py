@@ -234,6 +234,11 @@ class RailwayGraph:
         for station_id in route:
             if station_id not in self.stations:
                 return False, f"Unknown station id: {station_id}"
+        if len(set(route)) != len(route):
+            # A repeated station means the plan doubles back on itself. The
+            # movement model has no reversal, so such a route never completes.
+            repeated = next(s for i, s in enumerate(route) if s in route[:i])
+            return False, f"Route passes through {repeated} more than once."
         for from_node, to_node in zip(route, route[1:]):
             edge = self.get_edge(from_node, to_node)
             if edge is None:

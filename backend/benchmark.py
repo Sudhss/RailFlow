@@ -200,21 +200,13 @@ def _run_one(scenario_key: str, ticks: int, use_agent: bool) -> dict:
     reroutes = holds = stops = congestion_ticks = 0
     prev_dec = None
 
+    # Both arms run the same tick loop. Only the agent is switched off, so any
+    # difference in the results comes from agent decisions rather than from a
+    # second, drifting copy of the movement physics.
+    sim.agent_enabled = use_agent
+
     for _ in range(ticks):
-        if use_agent:
-            sim.advance_tick()
-        else:
-            if sim.paused:
-                continue
-            sim.tick += SIM_TICK_MINUTES
-            if sim.emergency_halt_active:
-                for train in sim.trains.values():
-                    if train.status != "arrived":
-                        train.stop()
-                        train.delay += 1
-                continue
-            for train in list(sim.trains.values()):
-                sim._advance_train(train)
+        sim.advance_tick()
 
         occ = sim.occupancy()
         for eid, n in occ.items():
